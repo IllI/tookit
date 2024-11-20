@@ -4,7 +4,7 @@ import { executablePath } from 'puppeteer';
 
 puppeteer.use(StealthPlugin());
 
-export async function setupBrowser() {
+async function setupBrowser() {
   return await puppeteer.launch({
     headless: false,
     executablePath: executablePath(),
@@ -20,7 +20,7 @@ export async function setupBrowser() {
   });
 }
 
-export async function setupPage(browser) {
+async function setupPage(browser) {
   const page = await browser.newPage();
   
   await page.setExtraHTTPHeaders({
@@ -35,11 +35,14 @@ export async function setupPage(browser) {
   return page;
 }
 
-export function formatPrice(price) {
-  return typeof price === 'number' ? price.toFixed(2) : price;
+function formatPrice(price) {
+  if (typeof price === 'string') {
+    return parseFloat(price.replace(/[^0-9.]/g, ''));
+  }
+  return price;
 }
 
-module.exports = {
+export {
   setupBrowser,
   setupPage,
   formatPrice

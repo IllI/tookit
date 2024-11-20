@@ -9,6 +9,7 @@
     "test": "node test.js",
     "search": "node test.js",
     "search-stubhub": "node src/run-stub-hub.js",
+    "search-vividseats": "node src/run-vivid-seats.js",
     "example": "node test.js --artist \"Taylor Swift\" --location \"New York, NY\" --source \"stubhub\""
   },
   "dependencies": {

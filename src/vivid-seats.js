@@ -276,6 +276,179 @@ class VividSeatsSearcher {
       }
     }
   }
+
+  async getTicketPrices(eventUrl, existingPage = null) {
+    let browser = null;
+    let page = existingPage;
+    
+    try {
+      if (!existingPage) {
+        browser = await setupBrowser();
+        page = await setupPage(browser);
+        console.log('Navigating to event page:', eventUrl);
+      }
+
+      // Function to check for content
+      const checkContent = async () => {
+        try {
+          const content = await page.evaluate(() => {
+            const selectors = [
+              '.styles_listingRowContainer__KNM4_',
+              '.styles_listingRowContainer__d8WLZ',
+              '[data-testid="listing-group-row-container"]',
+              '[data-testid="listing-row-container"]'
+            ];
+            
+            for (const selector of selectors) {
+              if (document.querySelector(selector)) {
+                return true;
+              }
+            }
+            return false;
+          });
+          return content;
+        } catch (error) {
+          console.log('Error checking content:', error);
+          return false;
+        }
+      };
+
+      // Initial navigation
+      try {
+        await page.goto(eventUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        await page.waitForTimeout(2000);
+      } catch (error) {
+        console.log('Initial navigation error:', error);
+      }
+
+      // Check for content
+      let contentFound = await checkContent();
+      let attempts = 1;
+      const maxAttempts = 3;
+
+      while (!contentFound && attempts < maxAttempts) {
+        console.log(`Content check attempt ${attempts} of ${maxAttempts}`);
+        
+        try {
+          await page.reload({ waitUntil: 'domcontentloaded' });
+          await page.waitForTimeout(2000);
+          contentFound = await checkContent();
+          
+          if (contentFound) {
+            console.log('Found content on attempt', attempts);
+            break;
+          }
+        } catch (error) {
+          console.log(`Error on attempt ${attempts}:`, error);
+        }
+        
+        attempts++;
+      }
+
+      if (!contentFound) {
+        throw new Error('Could not find content after multiple attempts');
+      }
+
+      // Extract tickets only if content was found
+      const tickets = await page.evaluate(() => {
+        const groupListings = Array.from(document.querySelectorAll('[data-testid="listing-group-row-container"]'));
+        const individualListings = Array.from(document.querySelectorAll('[data-testid="listing-row-container"]'));
+        
+        console.log(`Found ${groupListings.length} group listings and ${individualListings.length} individual listings`);
+        
+        const allListings = [...groupListings, ...individualListings];
+
+        const normalizeSection = (section) => {
+          if (!section) return 'UNKNOWN';
+          
+          const sectionUpper = section.toUpperCase();
+          const categories = {
+            'GENERAL ADMISSION': ['GA', 'GEN', 'GENADM'],
+            'GRANDSTAND': ['GRAND', 'GSADA', 'GS'],
+            'PREMIUM': ['PREM', 'PRM'],
+            'VIP': ['VIP'],
+            'BALCONY': ['BAL', 'BALC'],
+            'FLOOR': ['FLR', 'FLOOR'],
+            'STANDING': ['STAND']
+          };
+
+          for (const [category, keywords] of Object.entries(categories)) {
+            if (keywords.some(keyword => sectionUpper.includes(keyword))) {
+              return category;
+            }
+          }
+
+          return `UNCATEGORIZED: ${section}`;
+        };
+
+        const ticketsBySection = {};
+        
+        allListings.forEach((listing, index) => {
+          try {
+            const section = listing.querySelector('[data-testid^="GRANDS"], [data-testid^="GSADA"], [data-testid^="PREM"], [data-testid^="GENADM"], .MuiTypography-small-medium')?.textContent?.trim() || '';
+            const quantity = listing.querySelector('.MuiTypography-caption-regular')?.textContent?.trim() || '';
+            const price = listing.querySelector('[data-testid="listing-price"]')?.textContent?.trim() || '';
+            const row = listing.querySelector('[data-testid="row"]')?.textContent?.trim();
+            const dealScore = listing.querySelector('[data-testid="deal-score"], .styles_greatestScoreLabel__Kq4O3')?.textContent?.trim() || '';
+            const listingId = listing.getAttribute('data-listing-id');
+
+            const normalizedSection = normalizeSection(section);
+            
+            if (!ticketsBySection[normalizedSection]) {
+              ticketsBySection[normalizedSection] = {
+                section: normalizedSection,
+                originalSection: section,
+                category: normalizedSection.startsWith('UNCATEGORIZED') ? 'UNKNOWN' : normalizedSection,
+                tickets: []
+              };
+            }
+
+            if (price && section) {
+              ticketsBySection[normalizedSection].tickets.push({
+                quantity,
+                price,
+                dealScore,
+                rawPrice: parseFloat(price.replace(/[^0-9.]/g, '')),
+                row: row || null,
+                listingId,
+                originalSection: section,
+                listingUrl: window.location.href
+              });
+            }
+          } catch (err) {
+            console.log(`Error processing listing ${index + 1}:`, err);
+          }
+        });
+
+        Object.values(ticketsBySection).forEach(section => {
+          section.tickets.sort((a, b) => a.rawPrice - b.rawPrice);
+          section.lowestPrice = section.tickets[0]?.rawPrice || null;
+          section.highestPrice = section.tickets[section.tickets.length - 1]?.rawPrice || null;
+          section.numberOfListings = section.tickets.length;
+        });
+
+        return {
+          totalSections: Object.keys(ticketsBySection).length,
+          sections: Object.values(ticketsBySection).sort((a, b) => a.lowestPrice - b.lowestPrice)
+        };
+      });
+
+      console.log(`Found tickets in ${tickets.totalSections} sections`);
+      return tickets;
+
+    } catch (error) {
+      console.error('Error fetching ticket prices:', error);
+      return { totalSections: 0, sections: [] };
+    } finally {
+      if (browser && !existingPage) {
+        try {
+          await browser.close();
+        } catch (error) {
+          console.log('Error closing browser:', error);
+        }
+      }
+    }
+  }
 }
 
 export default VividSeatsSearcher;
