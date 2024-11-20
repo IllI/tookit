@@ -1,0 +1,28 @@
+{
+  "name": "ticket-searcher",
+  "version": "1.0.0",
+  "description": "Web scraper to find the cheapest tickets on Stubhub and VividSeats",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "test": "node test.js",
+    "search": "node test.js",
+    "search-stubhub": "node src/run-stub-hub.js",
+    "example": "node test.js --artist \"Taylor Swift\" --location \"New York, NY\" --source \"stubhub\""
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.46.1",
+    "date-fns": "^4.1.0",
+    "dotenv": "^16.4.5",
+    "proxy-chain": "^2.5.4",
+    "puppeteer": "^21.5.2",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-anonymize-ua": "^2.4.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "yargs": "^17.7.2"
+  },
+  "bin": {
+    "ticket-search": "./test.js"
+  }
+}
