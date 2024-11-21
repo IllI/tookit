@@ -188,7 +188,6 @@ class VividSeatsSearcher {
   async searchConcerts(artist, venue, location) {
     const browser = await setupBrowser();
     let searchPage;
-    let eventPage;
 
     try {
       searchPage = await setupPage(browser);
@@ -200,66 +199,230 @@ class VividSeatsSearcher {
         timeout: 30000
       });
 
-      await searchPage.waitForSelector('[data-testid^="production-listing-"]', { timeout: 10000 });
+      // Wait for either productions list to appear
+      await searchPage.waitForSelector('[data-testid="productions-list"]', { timeout: 10000 });
 
-      const concerts = await searchPage.evaluate((params) => {
-        const { artist, location } = params;
-        const events = Array.from(document.querySelectorAll('[data-testid^="production-listing-"]'));
-        
-        return events.map(event => {
-          try {
-            const title = event.querySelector('.MuiTypography-small-medium')?.textContent?.trim() || '';
-            const dayOfWeek = event.querySelector('.MuiTypography-overline')?.textContent?.trim() || '';
-            const date = event.querySelector('.MuiTypography-small-bold')?.textContent?.trim() || '';
-            const time = event.querySelector('.MuiTypography-caption')?.textContent?.trim() || '';
-            const venueElement = event.querySelector('.MuiTypography-small-regular.styles_truncate__yWy53');
-            const locationElement = event.querySelector('.MuiTypography-small-regular.styles_truncate__yWy53:last-child');
-            const venue = venueElement?.textContent?.trim() || '';
-            const eventLocation = locationElement?.textContent?.trim() || '';
-            const link = event.querySelector('a')?.href || '';
+      const concerts = await searchPage.evaluate(({ artist, location, venue }) => {
+        // Get all production listings from both "Upcoming Events" and "All Locations" sections
+        const productionLists = Array.from(document.querySelectorAll('[data-testid="productions-list"]'));
+        const allEvents = [];
 
-            if (title.toLowerCase().includes('parking')) {
-              return null;
+        productionLists.forEach(list => {
+          // First, get all production listings
+          const listings = Array.from(list.querySelectorAll('[data-testid^="production-listing-"]'));
+          console.log(`Found ${listings.length} listings`);
+
+          listings.forEach(listing => {
+            try {
+              // Get the anchor element and check if it exists and has href
+              const anchor = listing.querySelector('a');
+              if (!anchor || !anchor.href) {
+                console.log('Skipping listing - no valid link found');
+                return;
+              }
+
+              // Skip parking listings
+              if (anchor.href.toLowerCase().includes('parking')) {
+                console.log('Skipping parking listing');
+                return;
+              }
+
+              // Get date components with null checks
+              const dateElement = listing.querySelector('[data-testid="date-time-left-element"]');
+              if (!dateElement) {
+                console.log('Skipping listing - no date element found');
+                return;
+              }
+
+              const dayOfWeek = dateElement.querySelector('.MuiTypography-overline')?.textContent?.trim() || '';
+              const date = dateElement.querySelector('.MuiTypography-small-bold')?.textContent?.trim() || '';
+              const year = dateElement.querySelector('.MuiTypography-small-bold:last-of-type')?.textContent?.trim() || '';
+              const time = dateElement.querySelector('.MuiTypography-caption')?.textContent?.trim() || '';
+
+              // Get title with null check
+              const titleElement = listing.querySelector('.styles_titleTruncate__XiZ53');
+              if (!titleElement) {
+                console.log('Skipping listing - no title element found');
+                return;
+              }
+              const title = titleElement.textContent.trim();
+
+              // Find venue and location using the styles_labelContainer__ wildcard
+              const labelContainer = listing.querySelector('[class^="styles_labelContainer__"]');
+              if (!labelContainer) {
+                console.log('Skipping listing - no label container found');
+                return;
+              }
+
+              // Get all text truncate spans within the label container
+              const truncateSpans = Array.from(labelContainer.querySelectorAll('.styles_textTruncate__wsM3Q'));
+              if (truncateSpans.length < 2) {
+                console.log('Skipping listing - incomplete venue/location info');
+                return;
+              }
+
+              // First span is venue, last span is location
+              const venue = truncateSpans[0].textContent.trim();
+              const eventLocation = truncateSpans[truncateSpans.length - 1].textContent.trim();
+
+              // Only add event if we have all required fields
+              if (title && date && venue && eventLocation && anchor.href) {
+                console.log(`Found valid event: ${title} at ${venue}`);
+                allEvents.push({
+                  title,
+                  date: `${date} ${dayOfWeek} ${time}`,
+                  venue,
+                  location: eventLocation,
+                  link: anchor.href,
+                  source: 'vividseats',
+                  rawData: {
+                    dayOfWeek,
+                    date,
+                    year,
+                    time,
+                    fullTitle: title
+                  }
+                });
+              }
+            } catch (err) {
+              console.log('Error parsing event:', err);
             }
-
-            return {
-              title,
-              date: `${date} ${dayOfWeek} ${time}`,
-              venue,
-              location: eventLocation,
-              link,
-              source: 'vividseats'
-            };
-          } catch (err) {
-            console.log('Error parsing VividSeats event:', err);
-            return null;
-          }
-        })
-        .filter(event => event !== null)
-        .filter(event => {
-          const artistMatch = !artist || event.title.toLowerCase().includes(artist.toLowerCase());
-          const locationMatch = !location || event.location.toLowerCase().includes(location.toLowerCase());
-          return artistMatch && locationMatch && event.link;
+          });
         });
-      }, { artist, location });
+
+        // Score and sort events by relevance
+        return allEvents.map(event => {
+          let score = 0;
+          
+          // Exact title match
+          if (event.title.toLowerCase() === artist.toLowerCase()) score += 100;
+          // Contains artist name
+          else if (event.title.toLowerCase().includes(artist.toLowerCase())) score += 50;
+          
+          // Location match
+          if (event.location.toLowerCase().includes(location.toLowerCase())) score += 30;
+          
+          // Venue match (if provided)
+          if (venue && event.venue.toLowerCase().includes(venue.toLowerCase())) score += 20;
+
+          return { ...event, matchScore: score };
+        }).sort((a, b) => b.matchScore - a.matchScore);
+      }, { artist, location, venue });
 
       console.log(`Found ${concerts.length} matching VividSeats event(s)`);
       
-      const uniqueConcerts = concerts.reduce((acc, current) => {
-        const key = `${current.title}-${current.venue}-${current.date}`;
-        if (!acc[key]) {
-          acc[key] = current;
-        }
-        return acc;
-      }, {});
-
+      // Get tickets for the best matching event(s)
+      const bestMatches = concerts.filter(event => event.matchScore >= 50);
       const concertsWithPrices = [];
-      for (const concert of Object.values(uniqueConcerts)) {
-        const prices = await this.getTicketPrices(concert.link);
-        concertsWithPrices.push({
-          ...concert,
-          tickets: prices
+
+      // Process each event only once
+      const processedUrls = new Set();
+
+      for (const concert of bestMatches) {
+        // Skip if we've already processed this URL
+        if (processedUrls.has(concert.link)) {
+          continue;
+        }
+        
+        console.log(`Processing event: "${concert.title}" (match score: ${concert.matchScore})`);
+        
+        // Use the existing page to navigate to the event
+        await searchPage.goto(concert.link, { waitUntil: 'networkidle0', timeout: 30000 });
+        
+        // Extract tickets directly from the loaded page
+        const tickets = await searchPage.evaluate(() => {
+          const groupListings = Array.from(document.querySelectorAll('[data-testid="listing-group-row-container"]'));
+          const individualListings = Array.from(document.querySelectorAll('[data-testid="listing-row-container"]'));
+          
+          console.log(`Found ${groupListings.length} group listings and ${individualListings.length} individual listings`);
+          
+          const allListings = [...groupListings, ...individualListings];
+
+          const normalizeSection = (section) => {
+            if (!section) return 'UNKNOWN';
+            
+            const sectionUpper = section.toUpperCase();
+            const categories = {
+              'GENERAL ADMISSION': ['GA', 'GEN', 'GENADM'],
+              'GRANDSTAND': ['GRAND', 'GSADA', 'GS'],
+              'PREMIUM': ['PREM', 'PRM'],
+              'VIP': ['VIP'],
+              'BALCONY': ['BAL', 'BALC'],
+              'FLOOR': ['FLR', 'FLOOR'],
+              'STANDING': ['STAND']
+            };
+
+            for (const [category, keywords] of Object.entries(categories)) {
+              if (keywords.some(keyword => sectionUpper.includes(keyword))) {
+                return category;
+              }
+            }
+
+            return `UNCATEGORIZED: ${section}`;
+          };
+
+          const ticketsBySection = {};
+          
+          allListings.forEach((listing, index) => {
+            try {
+              const section = listing.querySelector('[data-testid^="GRANDS"], [data-testid^="GSADA"], [data-testid^="PREM"], [data-testid^="GENADM"], .MuiTypography-small-medium')?.textContent?.trim() || '';
+              const quantity = listing.querySelector('.MuiTypography-caption-regular')?.textContent?.trim() || '';
+              const price = listing.querySelector('[data-testid="listing-price"]')?.textContent?.trim() || '';
+              const row = listing.querySelector('[data-testid="row"]')?.textContent?.trim();
+              const dealScore = listing.querySelector('[data-testid="deal-score"], .styles_greatestScoreLabel__Kq4O3')?.textContent?.trim() || '';
+              const listingId = listing.getAttribute('data-listing-id');
+
+              const normalizedSection = normalizeSection(section);
+              
+              if (!ticketsBySection[normalizedSection]) {
+                ticketsBySection[normalizedSection] = {
+                  section: normalizedSection,
+                  originalSection: section,
+                  category: normalizedSection.startsWith('UNCATEGORIZED') ? 'UNKNOWN' : normalizedSection,
+                  tickets: []
+                };
+              }
+
+              if (price && section) {
+                ticketsBySection[normalizedSection].tickets.push({
+                  quantity,
+                  price,
+                  dealScore,
+                  rawPrice: parseFloat(price.replace(/[^0-9.]/g, '')),
+                  row: row || null,
+                  listingId,
+                  originalSection: section,
+                  listingUrl: window.location.href
+                });
+              }
+            } catch (err) {
+              console.log(`Error processing listing ${index + 1}:`, err);
+            }
+          });
+
+          Object.values(ticketsBySection).forEach(section => {
+            section.tickets.sort((a, b) => a.rawPrice - b.rawPrice);
+            section.lowestPrice = section.tickets[0]?.rawPrice || null;
+            section.highestPrice = section.tickets[section.tickets.length - 1]?.rawPrice || null;
+            section.numberOfListings = section.tickets.length;
+          });
+
+          return {
+            totalSections: Object.keys(ticketsBySection).length,
+            sections: Object.values(ticketsBySection).sort((a, b) => a.lowestPrice - b.lowestPrice)
+          };
         });
+
+        if (tickets && tickets.totalSections > 0) {
+          console.log(`Found tickets in ${tickets.totalSections} sections`);
+          concertsWithPrices.push({
+            ...concert,
+            tickets
+          });
+        }
+
+        // Mark this URL as processed
+        processedUrls.add(concert.link);
       }
 
       return concertsWithPrices;

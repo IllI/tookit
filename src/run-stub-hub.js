@@ -196,7 +196,8 @@ async function removeUnavailableTickets(eventId, scrapedTicketURLs) {
     const { data: existingTickets, error: fetchError } = await supabaseClient
       .from('tickets')
       .select('id, url')
-      .eq('event_id', eventId);
+      .eq('event_id', eventId)
+      .eq('source', 'stubhub');  // Only get StubHub tickets
     
     if (fetchError) {
       console.error('Error fetching existing tickets for removal:', fetchError);
@@ -208,7 +209,7 @@ async function removeUnavailableTickets(eventId, scrapedTicketURLs) {
     const ticketsToRemove = existingTickets.filter(ticket => !scrapedTicketsSet.has(ticket.url));
     
     if (ticketsToRemove.length === 0) {
-      console.log('No tickets to remove.');
+      console.log('No StubHub tickets to remove.');
       return;
     }
     
@@ -217,12 +218,13 @@ async function removeUnavailableTickets(eventId, scrapedTicketURLs) {
     const { error } = await supabaseClient
       .from('tickets')
       .delete()
-      .in('id', ticketIdsToRemove);
+      .in('id', ticketIdsToRemove)
+      .eq('source', 'stubhub');  // Extra safety check to only delete StubHub tickets
     
     if (error) {
-      console.error('Error removing unavailable tickets:', error);
+      console.error('Error removing unavailable StubHub tickets:', error);
     } else {
-      console.log(`Removed ${ticketsToRemove.length} unavailable tickets.`);
+      console.log(`Removed ${ticketsToRemove.length} unavailable StubHub tickets.`);
     }
   } catch (err) {
     console.error('Exception in removeUnavailableTickets:', err);
@@ -322,6 +324,6 @@ async function mainSearch(artist, venue, location) {
 }
 
 // Replace with your actual search parameters
-mainSearch('Cake', '', 'Chicago')
+mainSearch('jamie xx', '', 'Chicago')
   .then(() => console.log('Search and insertion completed'))
   .catch(err => console.error('Error in mainSearch:', err)); 
