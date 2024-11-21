@@ -2,6 +2,7 @@ import { createClient } from '@supabase/supabase-js';
 import dotenv from 'dotenv';
 import StubHubSearcher from './stub-hub.js';
 import { parse } from 'date-fns'; // Import parse from date-fns
+import { findMatchingEvent } from './event-utils.js';
 
 dotenv.config();
 
@@ -232,63 +233,7 @@ async function removeUnavailableTickets(eventId, scrapedTicketURLs) {
 }
 
 async function mainSearch(artist, venue, location) {
-  // First, try to find the event in the database
   try {
-    // Search for events matching the artist name
-    const { data: existingEvents, error: searchError } = await supabaseClient
-      .from('events')
-      .select(`
-        id,
-        name,
-        date,
-        venue,
-        event_links (
-          url,
-          source
-        )
-      `)
-      .ilike('name', `%${artist}%`)
-      .or(`venue.ilike.%${venue}%,venue.ilike.%${location}%`);
-
-    if (searchError) {
-      console.error('Error searching for existing events:', searchError);
-    } else if (existingEvents && existingEvents.length > 0) {
-      console.log('Found existing events in database:', existingEvents.length);
-      
-      // Find the StubHub link for the event
-      for (const event of existingEvents) {
-        const stubHubLink = event.event_links.find(link => link.source === 'stubhub')?.url;
-        
-        if (stubHubLink) {
-          console.log(`Found existing StubHub link for event "${event.name}": ${stubHubLink}`);
-          
-          // Create a new StubHubSearcher instance just for getting ticket prices
-          const searcher = new StubHubSearcher();
-          const tickets = await searcher.getTicketPrices(stubHubLink);
-          
-          if (tickets && tickets.totalSections > 0) {
-            await insertTickets(event.id, tickets);
-
-            // Collect all scraped ticket URLs for removal logic
-            const scrapedTicketURLs = tickets.sections.flatMap(section =>
-              section.tickets.map(ticket => ticket.listingUrl)
-            );
-
-            // Remove tickets that are no longer available
-            await removeUnavailableTickets(event.id, scrapedTicketURLs);
-          } else {
-            console.log(`No tickets found for event "${event.name}". Consider marking it as sold or removing it.`);
-          }
-          
-          // We found and processed the event, no need to continue
-          return;
-        }
-      }
-    }
-
-    // If we didn't find the event or couldn't process existing events, proceed with the web scraping
-    console.log('No existing event found in database, proceeding with web scraping...');
-    
     const searcher = new StubHubSearcher();
     const eventsWithTickets = await searcher.searchConcerts(artist, venue, location);
 
@@ -297,26 +242,41 @@ async function mainSearch(artist, venue, location) {
     for (const event of eventsWithTickets) {
       console.log('Processing Event:', JSON.stringify(event, null, 2));
       
-      const eventId = await insertEvent(event);
-      if (eventId) {
-        if (event.source === 'stubhub' && event.link) {
-          const stubhubLink = await insertEventLink(eventId, 'stubhub', event.link);
+      // Use findMatchingEvent to check for existing event
+      const matchingEvent = await findMatchingEvent(supabaseClient, {
+        name: event.name,
+        date: event.date,
+        venue: event.venue
+      }, 'stubhub');
+
+      if (matchingEvent) {
+        console.log(`Found matching event: "${matchingEvent.name}"`);
+        
+        if (!matchingEvent.hasSourceLink) {
+          // Add StubHub link to existing event
+          console.log('Adding StubHub link to existing event');
+          await insertEventLink(matchingEvent.id, 'stubhub', event.link);
+        }
+
+        // Update tickets regardless of whether we just added the link
+        if (event.tickets && event.tickets.totalSections > 0) {
+          await insertTickets(matchingEvent.id, event.tickets);
+
+          const scrapedTicketURLs = event.tickets.sections.flatMap(section =>
+            section.tickets.map(ticket => ticket.listingUrl)
+          );
+
+          await removeUnavailableTickets(matchingEvent.id, scrapedTicketURLs);
+        }
+      } else {
+        // Create new event if no match found
+        const eventId = await insertEvent(event);
+        if (eventId) {
+          await insertEventLink(eventId, 'stubhub', event.link);
           
           if (event.tickets && event.tickets.totalSections > 0) {
             await insertTickets(eventId, event.tickets);
-
-            // Collect all scraped ticket URLs for removal logic
-            const scrapedTicketURLs = event.tickets.sections.flatMap(section =>
-              section.tickets.map(ticket => ticket.listingUrl)
-            );
-
-            // Remove tickets that are no longer available
-            await removeUnavailableTickets(eventId, scrapedTicketURLs);
-          } else {
-            console.log(`No tickets found for event "${event.name}". Consider marking it as sold or removing it.`);
           }
-        } else {
-          console.warn(`No StubHub link found for event "${event.name}".`);
         }
       }
     }

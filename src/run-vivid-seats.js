@@ -2,6 +2,7 @@ import { createClient } from '@supabase/supabase-js';
 import dotenv from 'dotenv';
 import VividSeatsSearcher from './vivid-seats.js';
 import { parse } from 'date-fns';
+import { findMatchingEvent } from './event-utils.js';
 
 dotenv.config();
 
@@ -245,87 +246,45 @@ async function removeUnavailableTickets(eventId, scrapedTicketURLs) {
 
 async function mainSearch(artist, venue, location) {
   try {
-    // First, search for existing events in the database
-    const { data: existingEvents, error: searchError } = await supabaseClient
-      .from('events')
-      .select(`
-        id,
-        name,
-        date,
-        venue,
-        event_links (
-          url,
-          source
-        )
-      `);
-
-    if (searchError) {
-      console.error('Error searching for existing events:', searchError);
-      return;
-    }
-
-    // Function to normalize strings for comparison
-    const normalize = (str) => str.toLowerCase().replace(/[^a-z0-9]/g, '');
-
-    // Find matching event by artist name and date
-    const matchingEvent = existingEvents?.find(existingEvent => {
-      const nameMatch = normalize(existingEvent.name).includes(normalize(artist)) ||
-                       normalize(artist).includes(normalize(existingEvent.name));
-      
-      return nameMatch;
-    });
-
-    if (matchingEvent) {
-      console.log(`Found matching event in database: "${matchingEvent.name}"`);
-      
-      // Check for VividSeats link
-      const vividSeatsLink = matchingEvent.event_links.find(link => link.source === 'vividseats')?.url;
-      
-      if (vividSeatsLink) {
-        console.log(`Found existing VividSeats link: ${vividSeatsLink}`);
-        
-        // Get current tickets from VividSeats
-        const searcher = new VividSeatsSearcher();
-        const tickets = await searcher.getTicketPrices(vividSeatsLink);
-        
-        if (tickets && tickets.totalSections > 0) {
-          await insertTickets(matchingEvent.id, tickets);
-
-          // Get URLs of current tickets for comparison
-          const scrapedTicketURLs = tickets.sections.flatMap(section =>
-            section.tickets.map(ticket => ticket.listingUrl)
-          );
-
-          // Remove tickets that are no longer available
-          await removeUnavailableTickets(matchingEvent.id, scrapedTicketURLs);
-        } else {
-          console.log('No tickets found for existing event. They might be sold out.');
-        }
-        
-        return; // Exit after updating tickets
-      }
-    }
-
-    // If no matching event found or no VividSeats link exists, proceed with search
-    console.log('No existing VividSeats link found, proceeding with search...');
-    
     const searcher = new VividSeatsSearcher();
     const eventsWithTickets = await searcher.searchConcerts(artist, venue, location);
 
     for (const event of eventsWithTickets) {
-      // Check again if the event exists (in case it was added by another process)
-      const eventId = await insertEvent(event);
-      if (eventId) {
-        // Check if VividSeats link already exists for this event
-        const hasVividSeatsLink = await linkExists(eventId, 'vividseats');
-        if (!hasVividSeatsLink) {
+      // Use findMatchingEvent to check for existing event
+      const matchingEvent = await findMatchingEvent(supabaseClient, {
+        name: event.title,
+        date: event.date,
+        venue: event.venue
+      }, 'vividseats');
+
+      if (matchingEvent) {
+        console.log(`Found matching event: "${matchingEvent.name}"`);
+        
+        if (!matchingEvent.hasSourceLink) {
+          // Add VividSeats link to existing event
+          console.log('Adding VividSeats link to existing event');
+          await insertEventLink(matchingEvent.id, 'vividseats', event.link);
+        }
+
+        // Update tickets regardless of whether we just added the link
+        if (event.tickets && event.tickets.totalSections > 0) {
+          await insertTickets(matchingEvent.id, event.tickets);
+
+          const scrapedTicketURLs = event.tickets.sections.flatMap(section =>
+            section.tickets.map(ticket => ticket.listingUrl)
+          );
+
+          await removeUnavailableTickets(matchingEvent.id, scrapedTicketURLs);
+        }
+      } else {
+        // Create new event if no match found
+        const eventId = await insertEvent(event);
+        if (eventId) {
           await insertEventLink(eventId, 'vividseats', event.link);
           
           if (event.tickets && event.tickets.totalSections > 0) {
             await insertTickets(eventId, event.tickets);
           }
-        } else {
-          console.log(`VividSeats link already exists for event ID ${eventId}`);
         }
       }
     }
