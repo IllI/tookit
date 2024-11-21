@@ -241,12 +241,14 @@ async function mainSearch(artist, venue, location) {
         id,
         name,
         date,
+        venue,
         event_links (
           url,
           source
         )
       `)
-      .ilike('name', `%${artist}%`);
+      .ilike('name', `%${artist}%`)
+      .or(`venue.ilike.%${venue}%,venue.ilike.%${location}%`);
 
     if (searchError) {
       console.error('Error searching for existing events:', searchError);

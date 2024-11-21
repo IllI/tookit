@@ -344,35 +344,33 @@ class StubHubSearcher {
       listItems.forEach((item, index) => {
         try {
           const link = item.querySelector('a');
-          const titleMatch = item.textContent.match(/(?:PM|AM)(.*?)(?:Shed|Theatre|Arena|Center|Complex|Bar|Bottle)/);
+          const titleMatch = item.textContent.match(/(?:PM|AM)(.*?)(?:Byline|Shed|Theatre|Arena|Center|Complex|Bar|Bottle)/);
           const title = titleMatch?.[1]?.trim() || '';
 
           const timeElement = item.querySelector('time');
           const dateText = timeElement?.textContent?.trim() || '';
           
-          // Parse the date string (format: "Nov 23Sat8:00 PM")
-          const dateMatch = dateText.match(/([A-Za-z]+)\s+(\d+)([A-Za-z]+)?\s*(\d+:\d+\s*[AP]M)/);
+          // Updated regex to handle year in the middle
+          const dateMatch = dateText.match(/([A-Za-z]+)\s+(\d+)\s+(\d{4})([A-Za-z]+)(\d+:\d+\s*[AP]M)/i);
           let formattedDate = null;
           
           if (dateMatch) {
-            const [fullMatch, month, day, dayOfWeek, time] = dateMatch;
-            const year = '2024'; // Adjust if necessary
+            const [_, month, day, year, dayOfWeek, time] = dateMatch;
             const dateStr = `${month} ${day} ${year} ${time}`;
             formattedDate = dateStr;
-            // Log parsed date string
             results.logs.push(`Parsed Date String: ${dateStr}`);
           } else {
             results.logs.push(`Failed to parse date from text: "${dateText}"`);
           }
 
-          const venueMatch = item.textContent.match(/(?:at\s)?((?:Shed|Theatre|Arena|Center|Complex|Bar|Bottle)[^,]+)/);
+          const venueMatch = item.textContent.match(/(?:at\s)?((?:Byline|Shed|Theatre|Arena|Center|Complex|Bar|Bottle)[^,]+)/);
           const venue = venueMatch?.[1]?.trim() || '';
 
           const locationMatch = item.textContent.match(/([^,]+,\s*[A-Z]{2})/);
           const location = locationMatch?.[1]?.trim() || '';
 
           // Set category
-          const category = 'Concert'; // Set a default or extract accordingly
+          const category = 'Concert';
 
           if (title && formattedDate && venue && location && link?.href) {
             results.events.push({
@@ -384,8 +382,16 @@ class StubHubSearcher {
               link: link.href,
               source: 'stubhub'
             });
+            
+            // Add debug logging for successful event
+            results.logs.push(`Successfully parsed event: ${title} on ${formattedDate}`);
           } else {
             results.logs.push(`Incomplete data for event ${index + 1}, skipping insertion.`);
+            results.logs.push(`Title: ${title}`);
+            results.logs.push(`Date: ${formattedDate}`);
+            results.logs.push(`Venue: ${venue}`);
+            results.logs.push(`Location: ${location}`);
+            results.logs.push(`Has link: ${!!link?.href}`);
           }
 
           // Debug logging
