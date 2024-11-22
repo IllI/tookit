@@ -1,9 +1,9 @@
-import StubHubSearcher from '@/src/stub-hub';
-import VividSeatsSearcher from '@/src/vivid-seats';
+import StubHubSearcher from '../../src/stub-hub';
+import VividSeatsSearcher from '../../src/vivid-seats';
 import { createClient } from '@supabase/supabase-js';
-import { config } from '@/src/config/env';
+import { config } from '../../src/config/env';
 import type { SearchParams, SearchResult, Event, Ticket, TicketSource } from '../types/api';
-import { findMatchingEvent } from '@/src/event-utils';
+import { findMatchingEvent } from '../../src/event-utils';
 import { logger } from '../utils/logger';
 import { parse } from 'date-fns';
 

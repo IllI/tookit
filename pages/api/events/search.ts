@@ -19,10 +19,9 @@ export default async function handler(
     const params = req.body as SearchParams;
     logger.info('Search request received', params);
 
-    // Run both searches in parallel
     const result = await searchService.searchAll({
       ...params,
-      source: 'all'  // This will trigger both StubHub and VividSeats searches
+      source: 'all'
     });
 
     return res.status(result.success ? 200 : 500).json(result);
