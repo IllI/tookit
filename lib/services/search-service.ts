@@ -6,7 +6,6 @@ import type { SearchParams, SearchResult, Event, Ticket, TicketSource } from '..
 import { findMatchingEvent } from '../../src/event-utils';
 import { logger } from '../utils/logger';
 import { parse } from 'date-fns';
-
 const EDGE_FUNCTION_URL = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/functions/v1/search`
 
 export class SearchService {
