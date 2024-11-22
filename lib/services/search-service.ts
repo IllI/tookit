@@ -454,6 +454,7 @@ export class SearchService {
   }
 
   private async searchVividSeats(params: SearchParams): Promise<Event[]> {
+    let browser = null;
     try {
       const rawEvents = await this.vividSeatsSearcher.searchConcerts(
         params.artist || params.keyword || '',
@@ -461,55 +462,183 @@ export class SearchService {
         params.location || ''
       );
 
-      // Store events and get updated data
-      const storedEvents = await Promise.all(
-        rawEvents.map(async (event) => {
-          try {
-            const dateRegex = /([A-Za-z]+)\s+(\d+)\s+[A-Za-z]+\s+(\d+:\d+[ap]m)/i;
-            const match = event.date.match(dateRegex);
+      logger.info(`Found ${rawEvents.length} VividSeats events`);
+
+      // Process each event sequentially to avoid race conditions
+      const storedEvents = [];
+      for (const event of rawEvents) {
+        try {
+          // Parse VividSeats date format
+          const dateRegex = /([A-Za-z]+)\s+(\d+)\s+[A-Za-z]+\s+(\d+:\d+[ap]m)/i;
+          const match = event.date.match(dateRegex);
+          
+          if (!match) {
+            logger.error('Failed to parse VividSeats date:', event.date);
+            continue;
+          }
+
+          const [_, month, day, time] = match;
+          const year = '2025'; // Default to 2025 for future dates
+          const standardDateStr = `${month} ${day} ${year} ${time}`;
+          const parsedDate = parse(standardDateStr, 'MMM d yyyy h:mma', new Date());
+
+          if (isNaN(parsedDate.getTime())) {
+            logger.error('Invalid date after parsing:', standardDateStr);
+            continue;
+          }
+
+          // Check for existing event
+          const matchingEvent = await findMatchingEvent(
+            this.supabase,
+            {
+              name: event.title,
+              date: parsedDate.toISOString(),
+              venue: event.venue
+            },
+            'vividseats'
+          );
+
+          if (matchingEvent) {
+            logger.info(`Found matching event for VividSeats: ${matchingEvent.name}`);
             
-            let isoDate;
-            if (match) {
-              const [_, month, day, time] = match;
-              const year = '2025'; // Default to 2025 for future dates
-              const standardDateStr = `${month} ${day} ${year} ${time}`;
-              const parsedDate = parse(standardDateStr, 'MMM d yyyy h:mma', new Date());
-              isoDate = parsedDate.toISOString();
-            } else {
-              isoDate = new Date().toISOString();
-              logger.error('Failed to parse date:', event.date);
+            // Add VividSeats link if it doesn't exist
+            if (!matchingEvent.hasSourceLink) {
+              const { error: linkError } = await this.supabase
+                .from('event_links')
+                .insert({
+                  event_id: matchingEvent.id,
+                  source: 'vividseats',
+                  url: event.link
+                });
+
+              if (linkError) {
+                logger.error('Error inserting VividSeats link:', linkError);
+              } else {
+                logger.info('Added VividSeats link to existing event');
+              }
             }
 
-            const transformedEvent = {
-              id: event.id || '',
-              name: event.title || event.name,
-              date: isoDate,
-              venue: event.venue,
-              type: event.type || 'Concert',
-              category: event.category || 'Concert',
-              source: 'vividseats',
-              link: event.link,
-              tickets: event.tickets?.sections?.map(section => ({
-                section: section.section,
-                tickets: section.tickets.map(ticket => ({
-                  ...ticket,
-                  source: 'vividseats'
-                }))
-              }))
-            };
+            // Insert or update tickets
+            if (event.tickets?.sections) {
+              const tickets = this.transformTickets(matchingEvent.id, {
+                ...event,
+                source: 'vividseats'
+              });
 
-            return await this.storeEvent(transformedEvent);
-          } catch (error) {
-            logger.error('Error transforming VividSeats event:', error);
-            return null;
+              if (tickets.length > 0) {
+                const { error: ticketError } = await this.supabase
+                  .from('tickets')
+                  .insert(tickets);
+
+                if (ticketError) {
+                  logger.error('Error inserting VividSeats tickets:', ticketError);
+                } else {
+                  logger.info(`Inserted ${tickets.length} VividSeats tickets`);
+                }
+              }
+            }
+
+            // Get updated event data
+            const { data: updatedEvent } = await this.supabase
+              .from('events')
+              .select(`
+                *,
+                event_links (*),
+                tickets (*)
+              `)
+              .eq('id', matchingEvent.id)
+              .single();
+
+            if (updatedEvent) {
+              storedEvents.push(updatedEvent);
+            }
+          } else {
+            // Insert new event
+            const { data: newEvent, error: eventError } = await this.supabase
+              .from('events')
+              .insert({
+                name: event.title,
+                type: 'Concert',
+                category: 'Concert',
+                date: parsedDate.toISOString(),
+                venue: event.venue
+              })
+              .select()
+              .single();
+
+            if (eventError) {
+              logger.error('Error inserting new VividSeats event:', eventError);
+              continue;
+            }
+
+            logger.info(`Created new event: ${newEvent.name}`);
+
+            // Insert VividSeats link
+            const { error: linkError } = await this.supabase
+              .from('event_links')
+              .insert({
+                event_id: newEvent.id,
+                source: 'vividseats',
+                url: event.link
+              });
+
+            if (linkError) {
+              logger.error('Error inserting new VividSeats link:', linkError);
+            }
+
+            // Insert tickets
+            if (event.tickets?.sections) {
+              const tickets = this.transformTickets(newEvent.id, {
+                ...event,
+                source: 'vividseats'
+              });
+
+              if (tickets.length > 0) {
+                const { error: ticketError } = await this.supabase
+                  .from('tickets')
+                  .insert(tickets);
+
+                if (ticketError) {
+                  logger.error('Error inserting new VividSeats tickets:', ticketError);
+                } else {
+                  logger.info(`Inserted ${tickets.length} new VividSeats tickets`);
+                }
+              }
+            }
+
+            // Get complete event data
+            const { data: completeEvent } = await this.supabase
+              .from('events')
+              .select(`
+                *,
+                event_links (*),
+                tickets (*)
+              `)
+              .eq('id', newEvent.id)
+              .single();
+
+            if (completeEvent) {
+              storedEvents.push(completeEvent);
+            }
           }
-        })
-      );
+        } catch (error) {
+          logger.error('Error processing VividSeats event:', error);
+        }
+      }
 
-      return storedEvents.filter(Boolean) as Event[];
+      logger.info(`Successfully stored ${storedEvents.length} VividSeats events`);
+      return storedEvents;
     } catch (error) {
       logger.error('VividSeats search error:', error);
       return [];
+    } finally {
+      if (browser) {
+        try {
+          await browser.close();
+        } catch (error) {
+          logger.error('Error closing browser:', error);
+        }
+      }
     }
   }
 }
