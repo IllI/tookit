@@ -1,30 +1,36 @@
 {
   "name": "ticket-searcher",
   "version": "1.0.0",
-  "description": "Web scraper to find the cheapest tickets on Stubhub and VividSeats",
-  "main": "index.js",
-  "type": "module",
+  "private": true,
   "scripts": {
-    "start": "node index.js",
-    "test": "node test.js",
-    "search": "node test.js",
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
     "search-stubhub": "node src/run-stub-hub.js",
-    "search-vividseats": "node src/run-vivid-seats.js",
-    "example": "node test.js --artist \"Taylor Swift\" --location \"New York, NY\" --source \"stubhub\""
+    "search-vividseats": "node src/run-vivid-seats.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.46.1",
     "date-fns": "^4.1.0",
     "dotenv": "^16.4.5",
-    "lucide-react": "^0.460.0",
-    "proxy-chain": "^2.5.4",
+    "next": "14.0.4",
     "puppeteer": "^21.11.0",
     "puppeteer-extra": "^3.3.6",
-    "puppeteer-extra-plugin-anonymize-ua": "^2.4.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
-    "yargs": "^17.7.2"
+    "react": "^18",
+    "react-dom": "^18",
+    "typescript": "^5"
   },
-  "bin": {
-    "ticket-search": "./test.js"
+  "devDependencies": {
+    "@tailwindcss/forms": "^0.5.9",
+    "@types/node": "^20",
+    "@types/react": "^18",
+    "@types/react-dom": "^18",
+    "autoprefixer": "^10.4.20",
+    "eslint": "^8",
+    "eslint-config-next": "14.0.4",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.15"
   }
 }

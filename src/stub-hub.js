@@ -1,9 +1,12 @@
-import puppeteer from 'puppeteer-extra';
-import StealthPlugin from 'puppeteer-extra-plugin-stealth';
-import { executablePath } from 'puppeteer';
+import { createClient } from '@supabase/supabase-js';
+import { config } from '@/src/config/env';
+import { setupBrowser, setupPage } from './utils.js';
 import { parse } from 'date-fns';
 
-puppeteer.use(StealthPlugin());
+const supabaseClient = createClient(
+  config.supabase.url,
+  config.supabase.serviceKey
+);
 
 class StubHubSearcher {
   constructor() {
@@ -18,34 +21,11 @@ class StubHubSearcher {
   }
 
   async setupBrowser() {
-    return await puppeteer.launch({
-      headless: false,
-      executablePath: executablePath(),
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-blink-features=AutomationControlled',
-        '--window-size=1920,1080',
-        '--disable-features=site-per-process',
-        '--disable-web-security'
-      ],
-      defaultViewport: { width: 1920, height: 1080 }
-    });
+    return await setupBrowser();
   }
 
   async setupPage(browser) {
-    const page = await browser.newPage();
-    
-    await page.setExtraHTTPHeaders({
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-      'Accept-Language': 'en-US,en;q=0.9',
-      'Accept-Encoding': 'gzip, deflate, br',
-      'Connection': 'keep-alive'
-    });
-
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-
-    return page;
+    return await setupPage(browser);
   }
 
   async getTicketPrices(eventUrl, existingPage = null) {

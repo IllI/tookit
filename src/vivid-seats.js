@@ -1,13 +1,11 @@
 import { createClient } from '@supabase/supabase-js';
-import dotenv from 'dotenv';
+import { config } from '@/src/config/env';
 import { setupBrowser, setupPage, formatPrice } from './utils.js';
 import { parse } from 'date-fns';
 
-dotenv.config();
-
 const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL,
-  process.env.SUPABASE_KEY
+  config.supabase.url,
+  config.supabase.serviceKey
 );
 
 // Function to check if an event exists
