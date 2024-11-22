@@ -1,76 +1,45 @@
 import { NextApiRequest, NextApiResponse } from 'next';
-import StubHubSearcher from '@/lib/stub-hub';
-import VividSeatsSearcher from '@/lib/vivid-seats';
-
-// Type definitions for our API
-type SearchParams = {
-  keyword?: string;
-  artist?: string;
-  venue?: string;
-  location?: string;
-  date?: string;
-};
-
-type SearchResponse = {
-  success: boolean;
-  data?: any[];
-  error?: string;
-};
+import StubHubSearcher from '../../src/stub-hub';
+import VividSeatsSearcher from '../../src/vivid-seats';
+import { createClient } from '@supabase/supabase-js';
+import { config } from '../../src/config/env';
+import type { SearchParams, SearchResult } from '@/lib/types/api';
+import { findMatchingEvent } from '../../src/event-utils';
+import { logger } from '@/lib/utils/logger';
 
 export default async function handler(
   req: NextApiRequest,
-  res: NextApiResponse<SearchResponse>
+  res: NextApiResponse<SearchResult>
 ) {
   if (req.method !== 'POST') {
-    return res.status(405).json({ success: false, error: 'Method not allowed' });
+    return res.status(405).json({
+      success: false,
+      error: 'Method not allowed',
+      metadata: {}
+    });
   }
 
   try {
-    const { keyword, artist, venue, location, date } = req.body as SearchParams;
+    const params = req.body as SearchParams;
+    logger.info('Search request received', params);
 
-    // Initialize searchers
+    const supabase = createClient(
+      config.supabase.url,
+      config.supabase.serviceKey
+    );
+
     const stubHubSearcher = new StubHubSearcher();
     const vividSeatsSearcher = new VividSeatsSearcher();
 
-    // Run searches in parallel
-    const [stubHubResults, vividSeatsResults] = await Promise.all([
-      stubHubSearcher.searchConcerts(artist || keyword || '', venue || '', location || ''),
-      vividSeatsSearcher.searchConcerts(artist || keyword || '', venue || '', location || '')
-    ]);
-
-    // Combine and normalize results
-    const allResults = [
-      ...stubHubResults.map(event => ({
-        ...event,
-        source: 'StubHub',
-        lowestPrice: event.tickets?.sections?.reduce((min, section) => 
-          Math.min(min, section.lowestPrice || Infinity), Infinity) || null
-      })),
-      ...vividSeatsResults.map(event => ({
-        ...event,
-        source: 'VividSeats',
-        lowestPrice: event.tickets?.sections?.reduce((min, section) => 
-          Math.min(min, section.lowestPrice || Infinity), Infinity) || null
-      }))
-    ];
-
-    // Sort by price
-    const sortedResults = allResults.sort((a, b) => {
-      if (a.lowestPrice === null) return 1;
-      if (b.lowestPrice === null) return -1;
-      return a.lowestPrice - b.lowestPrice;
-    });
-
-    return res.status(200).json({
-      success: true,
-      data: sortedResults
-    });
-
+    // ... rest of your handler code
   } catch (error) {
-    console.error('Search error:', error);
+    logger.error('API error:', error);
     return res.status(500).json({
       success: false,
-      error: 'Failed to perform search'
+      error: 'Internal server error',
+      metadata: {
+        error: error instanceof Error ? error.message : 'Unknown error'
+      }
     });
   }
 }
