@@ -6,7 +6,6 @@ import type { SearchParams, SearchResult, Event, Ticket, TicketSource } from '..
 import { findMatchingEvent } from '../../src/event-utils';
 import { logger } from '../utils/logger';
 import { parse } from 'date-fns';
-const EDGE_FUNCTION_URL = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/functions/v1/search`
 
 export class SearchService {
   private supabase;
@@ -24,20 +23,108 @@ export class SearchService {
 
   async searchAll(params: SearchParams): Promise<SearchResult> {
     try {
-      const response = await fetch(EDGE_FUNCTION_URL, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY}`
-        },
-        body: JSON.stringify(params)
-      })
+      // Add a timestamp to track when the search started
+      const searchStartTime = new Date();
 
-      if (!response.ok) {
-        throw new Error('Search failed')
+      // Get existing events and tickets from database first
+      const { data: existingEvents } = await this.supabase
+        .from('events')
+        .select(`
+          *,
+          event_links (*),
+          tickets (*)
+        `)
+        .ilike('name', `%${params.keyword || params.artist}%`)
+        .gte('date', new Date().toISOString());
+
+      logger.info('Found existing events:', existingEvents?.length || 0);
+
+      // Start searches in parallel with timeouts
+      const searches = [];
+      const sources: Record<string, TicketSource> = {};
+
+      if (params.source === 'all' || params.source === 'stubhub') {
+        searches.push(
+          this.searchStubHub(params)
+            .then(results => {
+              sources.stubhub = { 
+                isLive: true, 
+                lastUpdated: searchStartTime.toISOString() 
+              };
+              return results;
+            })
+            .catch(error => {
+              logger.error('StubHub search error:', error);
+              sources.stubhub = {
+                isLive: false,
+                lastUpdated: existingEvents?.find(e => 
+                  e.event_links.some(l => l.source === 'stubhub')
+                )?.updated_at || searchStartTime.toISOString(),
+                error: error.message
+              };
+              return [];
+            })
+        );
       }
 
-      return await response.json()
+      if (params.source === 'all' || params.source === 'vividseats') {
+        searches.push(
+          this.searchVividSeats(params)
+            .then(results => {
+              sources.vividseats = { 
+                isLive: true, 
+                lastUpdated: searchStartTime.toISOString() 
+              };
+              return results;
+            })
+            .catch(error => {
+              logger.error('VividSeats search error:', error);
+              sources.vividseats = {
+                isLive: false,
+                lastUpdated: existingEvents?.find(e => 
+                  e.event_links.some(l => l.source === 'vividseats')
+                )?.updated_at || searchStartTime.toISOString(),
+                error: error.message
+              };
+              return [];
+            })
+        );
+      }
+
+      // Wait for all searches with a timeout
+      const results = await Promise.race([
+        Promise.all(searches),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Search timeout')), 60000)
+        )
+      ]);
+
+      // Combine and deduplicate results
+      const allEvents = [...(existingEvents || []), ...results.flat()];
+      const eventMap = new Map<string, Event>();
+      
+      allEvents.forEach(event => {
+        const key = `${event.name}-${event.date}-${event.venue}`;
+        if (!eventMap.has(key) || event.tickets?.length > (eventMap.get(key)?.tickets?.length || 0)) {
+          eventMap.set(key, event);
+        }
+      });
+
+      const combinedResults = Array.from(eventMap.values());
+
+      logger.info('Search completed', {
+        totalResults: combinedResults.length,
+        sources: Object.keys(sources)
+      });
+
+      return {
+        success: true,
+        data: combinedResults,
+        metadata: {
+          total: combinedResults.length,
+          sources
+        }
+      };
     } catch (error) {
       logger.error('Search error:', error);
       return {
