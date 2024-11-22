@@ -79,7 +79,7 @@ export default function TicketResults({ results, isLoading, lastUpdated }: Ticke
       <div className="space-y-8">
         {sortedEvents.map((event) => (
           <div 
-            key={`${event.id}-${event.source}`}
+            key={`${event.id}-${event.source || 'unknown'}`}
             className="border rounded-lg p-4 shadow-sm"
           >
             <div className="flex justify-between items-start mb-4">

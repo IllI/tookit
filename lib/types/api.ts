@@ -14,6 +14,7 @@ export type Event = {
   venue: string;
   type?: string;
   category?: string;
+  source?: string;
   links?: EventLink[];
   tickets?: Ticket[];
 };
