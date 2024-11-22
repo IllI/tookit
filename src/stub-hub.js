@@ -264,8 +264,17 @@ class StubHubSearcher {
 
       console.log('Found matching events:', matchingEvents.length);
 
+      // Create a Set to track processed event URLs
+      const processedUrls = new Set();
       const eventsWithTickets = [];
+
       for (const event of matchingEvents) {
+        // Skip if we've already processed this event URL
+        if (processedUrls.has(event.link)) {
+          console.log('Skipping duplicate event URL:', event.link);
+          continue;
+        }
+
         const { success, page: newPage } = await this.navigateToEvent(searchPage, event);
         if (success && newPage) {
           eventPage = newPage;
@@ -282,6 +291,9 @@ class StubHubSearcher {
             source: event.source,
             tickets: tickets
           });
+
+          // Mark this URL as processed
+          processedUrls.add(event.link);
 
           await eventPage.close();
           await searchPage.waitForTimeout(1000);

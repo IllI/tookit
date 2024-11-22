@@ -5,6 +5,7 @@ import { config } from '@/src/config/env';
 import type { SearchParams, SearchResult, Event, Ticket, TicketSource } from '../types/api';
 import { findMatchingEvent } from '@/src/event-utils';
 import { logger } from '../utils/logger';
+import { parse } from 'date-fns';
 
 export class SearchService {
   private supabase;
@@ -22,7 +23,11 @@ export class SearchService {
 
   async searchAll(params: SearchParams): Promise<SearchResult> {
     try {
-      // Get existing events and tickets from database first
+      const searchStartTime = new Date();
+      let searchCompleted = false;
+      let searchTimeout: NodeJS.Timeout;
+
+      // Get existing events first
       const { data: existingEvents } = await this.supabase
         .from('events')
         .select(`
@@ -30,39 +35,98 @@ export class SearchService {
           event_links (*),
           tickets (*)
         `)
-        .ilike('name', `%${params.keyword || params.artist}%`);
+        .ilike('name', `%${params.keyword || params.artist}%`)
+        .gte('date', new Date().toISOString());
 
-      // Start searches in parallel
+      logger.info('Found existing events:', existingEvents?.length || 0);
+
+      // Create a promise that rejects after timeout
+      const timeoutPromise = new Promise((_, reject) => {
+        searchTimeout = setTimeout(() => {
+          reject(new Error('Search timeout'));
+        }, 60000); // 60 second timeout
+      });
+
+      // Run searches with timeout
       const searches = [];
       const sources: Record<string, TicketSource> = {};
-      
+
       if (params.source === 'all' || params.source === 'stubhub') {
         searches.push(
           this.searchStubHub(params)
             .then(results => {
-              sources.stubhub = { isLive: true, lastUpdated: new Date().toISOString() };
+              sources.stubhub = { 
+                isLive: true, 
+                lastUpdated: searchStartTime.toISOString() 
+              };
               return results;
             })
             .catch(error => {
+              logger.error('StubHub search error:', error);
               sources.stubhub = {
                 isLive: false,
-                lastUpdated: existingEvents?.[0]?.updated_at || new Date().toISOString(),
+                lastUpdated: existingEvents?.find(e => 
+                  e.event_links.some(l => l.source === 'stubhub')
+                )?.updated_at || searchStartTime.toISOString(),
                 error: error.message
               };
-              // Return existing StubHub tickets if search fails
               return existingEvents?.filter(e => 
-                e.tickets.some(t => t.source === 'stubhub')
+                e.event_links.some(l => l.source === 'stubhub')
               ) || [];
             })
         );
       }
-      
+
       if (params.source === 'all' || params.source === 'vividseats') {
-        searches.push(this.searchVividSeats(params));
+        searches.push(
+          this.searchVividSeats(params)
+            .then(results => {
+              sources.vividseats = { 
+                isLive: true, 
+                lastUpdated: searchStartTime.toISOString() 
+              };
+              return results;
+            })
+            .catch(error => {
+              logger.error('VividSeats search error:', error);
+              sources.vividseats = {
+                isLive: false,
+                lastUpdated: existingEvents?.find(e => 
+                  e.event_links.some(l => l.source === 'vividseats')
+                )?.updated_at || searchStartTime.toISOString(),
+                error: error.message
+              };
+              return existingEvents?.filter(e => 
+                e.event_links.some(l => l.source === 'vividseats')
+              ) || [];
+            })
+        );
       }
 
-      const searchResults = await Promise.all(searches);
-      const combinedResults = searchResults.flat();
+      // Wait for all searches or timeout
+      const results = await Promise.race([
+        Promise.all(searches),
+        timeoutPromise
+      ]).finally(() => {
+        clearTimeout(searchTimeout);
+        searchCompleted = true;
+      });
+
+      // Combine and deduplicate results
+      const eventMap = new Map<string, Event>();
+      results.flat().forEach(event => {
+        const key = `${event.name}-${event.date}-${event.venue}`;
+        if (!eventMap.has(key) || event.tickets?.length > (eventMap.get(key)?.tickets?.length || 0)) {
+          eventMap.set(key, event);
+        }
+      });
+
+      const combinedResults = Array.from(eventMap.values());
+
+      logger.info('Search completed', {
+        totalResults: combinedResults.length,
+        sources: Object.keys(sources)
+      });
 
       return {
         success: true,
@@ -218,24 +282,171 @@ export class SearchService {
         params.location || ''
       );
 
-      // Transform raw events into Event type
-      return rawEvents.map(event => ({
-        id: event.id || '', // Will be assigned when stored
-        name: event.name,
-        date: new Date(event.date).toISOString(),
-        venue: event.venue,
-        type: event.type || 'Concert',
-        category: event.category || 'Concert',
-        source: 'stubhub',
-        link: event.link,
-        tickets: event.tickets?.sections?.map(section => ({
-          section: section.section,
-          tickets: section.tickets.map(ticket => ({
-            ...ticket,
-            source: 'stubhub'
-          }))
-        }))
-      }));
+      logger.info(`Found ${rawEvents.length} StubHub events`);
+
+      // Process each event sequentially to avoid race conditions
+      const storedEvents = [];
+      for (const event of rawEvents) {
+        try {
+          // Parse the date string properly
+          const dateRegex = /([A-Za-z]+)\s+(\d+)\s+(\d{4}).*?(\d+:\d+\s*[AP]M)/i;
+          const match = event.date.match(dateRegex);
+          
+          if (!match) {
+            logger.error('Failed to parse StubHub date:', event.date);
+            continue;
+          }
+
+          const [_, month, day, year, time] = match;
+          const standardDateStr = `${month} ${day} ${year} ${time}`;
+          const parsedDate = parse(standardDateStr, 'MMM d yyyy h:mm a', new Date());
+
+          if (isNaN(parsedDate.getTime())) {
+            logger.error('Invalid date after parsing:', standardDateStr);
+            continue;
+          }
+
+          // Check for existing event
+          const matchingEvent = await findMatchingEvent(
+            this.supabase,
+            {
+              name: event.name,
+              date: parsedDate.toISOString(),
+              venue: event.venue
+            },
+            'stubhub'
+          );
+
+          if (matchingEvent) {
+            logger.info(`Found matching event for StubHub: ${matchingEvent.name}`);
+            
+            // Add StubHub link if it doesn't exist
+            if (!matchingEvent.hasSourceLink) {
+              const { error: linkError } = await this.supabase
+                .from('event_links')
+                .insert({
+                  event_id: matchingEvent.id,
+                  source: 'stubhub',
+                  url: event.link
+                });
+
+              if (linkError) {
+                logger.error('Error inserting StubHub link:', linkError);
+              } else {
+                logger.info('Added StubHub link to existing event');
+              }
+            }
+
+            // Insert or update tickets
+            if (event.tickets?.sections) {
+              const tickets = this.transformTickets(matchingEvent.id, {
+                ...event,
+                source: 'stubhub'
+              });
+
+              if (tickets.length > 0) {
+                const { error: ticketError } = await this.supabase
+                  .from('tickets')
+                  .insert(tickets);
+
+                if (ticketError) {
+                  logger.error('Error inserting StubHub tickets:', ticketError);
+                } else {
+                  logger.info(`Inserted ${tickets.length} StubHub tickets`);
+                }
+              }
+            }
+
+            // Get updated event data
+            const { data: updatedEvent } = await this.supabase
+              .from('events')
+              .select(`
+                *,
+                event_links (*),
+                tickets (*)
+              `)
+              .eq('id', matchingEvent.id)
+              .single();
+
+            if (updatedEvent) {
+              storedEvents.push(updatedEvent);
+            }
+          } else {
+            // Insert new event
+            const { data: newEvent, error: eventError } = await this.supabase
+              .from('events')
+              .insert({
+                name: event.name,
+                type: 'Concert',
+                category: event.category || 'Concert',
+                date: parsedDate.toISOString(),
+                venue: event.venue
+              })
+              .select()
+              .single();
+
+            if (eventError) {
+              logger.error('Error inserting new StubHub event:', eventError);
+              continue;
+            }
+
+            logger.info(`Created new event: ${newEvent.name}`);
+
+            // Insert StubHub link
+            const { error: linkError } = await this.supabase
+              .from('event_links')
+              .insert({
+                event_id: newEvent.id,
+                source: 'stubhub',
+                url: event.link
+              });
+
+            if (linkError) {
+              logger.error('Error inserting new StubHub link:', linkError);
+            }
+
+            // Insert tickets
+            if (event.tickets?.sections) {
+              const tickets = this.transformTickets(newEvent.id, {
+                ...event,
+                source: 'stubhub'
+              });
+
+              if (tickets.length > 0) {
+                const { error: ticketError } = await this.supabase
+                  .from('tickets')
+                  .insert(tickets);
+
+                if (ticketError) {
+                  logger.error('Error inserting new StubHub tickets:', ticketError);
+                } else {
+                  logger.info(`Inserted ${tickets.length} new StubHub tickets`);
+                }
+              }
+            }
+
+            // Get complete event data
+            const { data: completeEvent } = await this.supabase
+              .from('events')
+              .select(`
+                *,
+                event_links (*),
+                tickets (*)
+              `)
+              .eq('id', newEvent.id)
+              .single();
+
+            if (completeEvent) {
+              storedEvents.push(completeEvent);
+            }
+          }
+        } catch (error) {
+          logger.error('Error processing StubHub event:', error);
+        }
+      }
+
+      logger.info(`Successfully stored ${storedEvents.length} StubHub events`);
+      return storedEvents;
     } catch (error) {
       logger.error('StubHub search error:', error);
       return [];
@@ -250,24 +461,52 @@ export class SearchService {
         params.location || ''
       );
 
-      // Transform raw events into Event type
-      return rawEvents.map(event => ({
-        id: event.id || '', // Will be assigned when stored
-        name: event.title || event.name,
-        date: new Date(event.date).toISOString(),
-        venue: event.venue,
-        type: event.type || 'Concert',
-        category: event.category || 'Concert',
-        source: 'vividseats',
-        link: event.link,
-        tickets: event.tickets?.sections?.map(section => ({
-          section: section.section,
-          tickets: section.tickets.map(ticket => ({
-            ...ticket,
-            source: 'vividseats'
-          }))
-        }))
-      }));
+      // Store events and get updated data
+      const storedEvents = await Promise.all(
+        rawEvents.map(async (event) => {
+          try {
+            const dateRegex = /([A-Za-z]+)\s+(\d+)\s+[A-Za-z]+\s+(\d+:\d+[ap]m)/i;
+            const match = event.date.match(dateRegex);
+            
+            let isoDate;
+            if (match) {
+              const [_, month, day, time] = match;
+              const year = '2025'; // Default to 2025 for future dates
+              const standardDateStr = `${month} ${day} ${year} ${time}`;
+              const parsedDate = parse(standardDateStr, 'MMM d yyyy h:mma', new Date());
+              isoDate = parsedDate.toISOString();
+            } else {
+              isoDate = new Date().toISOString();
+              logger.error('Failed to parse date:', event.date);
+            }
+
+            const transformedEvent = {
+              id: event.id || '',
+              name: event.title || event.name,
+              date: isoDate,
+              venue: event.venue,
+              type: event.type || 'Concert',
+              category: event.category || 'Concert',
+              source: 'vividseats',
+              link: event.link,
+              tickets: event.tickets?.sections?.map(section => ({
+                section: section.section,
+                tickets: section.tickets.map(ticket => ({
+                  ...ticket,
+                  source: 'vividseats'
+                }))
+              }))
+            };
+
+            return await this.storeEvent(transformedEvent);
+          } catch (error) {
+            logger.error('Error transforming VividSeats event:', error);
+            return null;
+          }
+        })
+      );
+
+      return storedEvents.filter(Boolean) as Event[];
     } catch (error) {
       logger.error('VividSeats search error:', error);
       return [];

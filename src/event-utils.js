@@ -75,92 +75,131 @@ export async function findMatchingEvent(supabaseClient, eventDetails, source) {
     source
   });
 
-  const { data: existingEvents, error: searchError } = await supabaseClient
-    .from('events')
-    .select(`
-      id,
-      name,
-      date,
-      venue,
-      event_links (
-        url,
-        source
-      )
-    `);
+  try {
+    // First, try to find exact matches
+    const { data: exactMatches, error: exactError } = await supabaseClient
+      .from('events')
+      .select(`
+        id,
+        name,
+        date,
+        venue,
+        event_links (
+          url,
+          source
+        )
+      `)
+      .ilike('name', getBaseArtistName(eventDetails.name || eventDetails.title))
+      .gte('date', new Date().toISOString());
 
-  if (searchError) {
-    console.error('Error searching for events:', searchError);
-    return null;
-  }
-
-  // Parse the new event's date
-  const newEventDate = parseEventDate(eventDetails.date);
-  if (!newEventDate) {
-    console.error('Could not parse event date:', eventDetails.date);
-    return null;
-  }
-
-  console.log('Parsed new event date:', newEventDate);
-
-  const matches = existingEvents
-    .map(existingEvent => {
-      const existingDate = new Date(existingEvent.date);
-      
-      const nameSimilarity = getNameSimilarity(
-        getBaseArtistName(existingEvent.name),
-        getBaseArtistName(eventDetails.name || eventDetails.title)
-      );
-      
-      const venueSimilarity = getNameSimilarity(
-        existingEvent.venue,
-        eventDetails.venue
-      );
-      
-      const dateMatch = isSameDay(existingDate, newEventDate);
-
-      const score = (nameSimilarity * 0.5) + (venueSimilarity * 0.3) + (dateMatch ? 0.2 : 0);
-
-      console.log('Match details:', {
-        existingName: existingEvent.name,
-        newName: eventDetails.name || eventDetails.title,
-        nameSimilarity,
-        venueSimilarity,
-        dateMatch,
-        score
-      });
-
-      return {
-        event: existingEvent,
-        score,
-        hasSourceLink: existingEvent.event_links.some(link => link.source === source)
-      };
-    })
-    .filter(match => match.score > 0.7) // Threshold for considering it a match
-    .sort((a, b) => b.score - a.score);
-
-  if (matches.length > 0) {
-    const bestMatch = matches[0];
-    console.log(`Found matching event: "${bestMatch.event.name}" (score: ${bestMatch.score.toFixed(2)})`);
-    
-    // If the new name is "cleaner", update it
-    const existingName = bestMatch.event.name;
-    const newName = eventDetails.name || eventDetails.title;
-    
-    if (existingName.includes('(') && !newName.includes('(')) {
-      console.log(`Updating event name from "${existingName}" to "${newName}"`);
-      await supabaseClient
-        .from('events')
-        .update({ name: newName })
-        .eq('id', bestMatch.event.id);
-      
-      bestMatch.event.name = newName;
+    if (exactError) {
+      console.error('Error searching for exact matches:', exactError);
+      return null;
     }
 
-    return {
-      ...bestMatch.event,
-      hasSourceLink: bestMatch.hasSourceLink
-    };
-  }
+    // Parse the new event's date
+    const newEventDate = parseEventDate(eventDetails.date);
+    if (!newEventDate) {
+      console.error('Could not parse event date:', eventDetails.date);
+      return null;
+    }
 
-  return null;
+    console.log('Parsed new event date:', newEventDate);
+
+    // First, try to find an exact match (same artist, same day, similar venue)
+    const exactMatch = exactMatches?.find(existingEvent => {
+      const existingDate = new Date(existingEvent.date);
+      return isSameDay(existingDate, newEventDate) &&
+             getNameSimilarity(existingEvent.venue, eventDetails.venue) > 0.6;
+    });
+
+    if (exactMatch) {
+      console.log('Found exact match:', exactMatch.name);
+      return {
+        ...exactMatch,
+        hasSourceLink: exactMatch.event_links.some(link => link.source === source)
+      };
+    }
+
+    // If no exact match, look for similar events
+    const matches = exactMatches
+      .map(existingEvent => {
+        const existingDate = new Date(existingEvent.date);
+        
+        const nameSimilarity = getNameSimilarity(
+          getBaseArtistName(existingEvent.name),
+          getBaseArtistName(eventDetails.name || eventDetails.title)
+        );
+        
+        const venueSimilarity = getNameSimilarity(
+          existingEvent.venue,
+          eventDetails.venue
+        );
+        
+        const dateMatch = isSameDay(existingDate, newEventDate);
+        const dateDiffInDays = Math.abs(existingDate.getTime() - newEventDate.getTime()) / (1000 * 60 * 60 * 24);
+
+        // Scoring system:
+        // - Name similarity: 0-40 points
+        // - Venue similarity: 0-30 points
+        // - Date match: 30 points
+        // - Date proximity penalty: -2 points per day difference (up to -20)
+        const score = (nameSimilarity * 0.4) + 
+                     (venueSimilarity * 0.3) + 
+                     (dateMatch ? 0.3 : Math.max(-0.2, -0.02 * dateDiffInDays));
+
+        console.log('Match details:', {
+          existingName: existingEvent.name,
+          newName: eventDetails.name || eventDetails.title,
+          nameSimilarity,
+          venueSimilarity,
+          dateMatch,
+          dateDiffInDays,
+          score
+        });
+
+        return {
+          event: existingEvent,
+          score,
+          hasSourceLink: existingEvent.event_links.some(link => link.source === source)
+        };
+      })
+      .filter(match => match.score > 0.8) // Require a very high match score
+      .sort((a, b) => b.score - a.score);
+
+    if (matches.length > 0) {
+      const bestMatch = matches[0];
+      console.log(`Found matching event: "${bestMatch.event.name}" (score: ${bestMatch.score.toFixed(2)})`);
+      
+      // Choose the better name
+      const existingName = bestMatch.event.name;
+      const newName = eventDetails.name || eventDetails.title;
+      
+      // Prefer names without parentheses or special characters
+      const shouldUpdateName = 
+        (existingName.includes('(') && !newName.includes('(')) ||
+        (existingName.includes('[') && !newName.includes('[')) ||
+        (existingName.length > newName.length && newName.length > 3);
+      
+      if (shouldUpdateName) {
+        console.log(`Updating event name from "${existingName}" to "${newName}"`);
+        await supabaseClient
+          .from('events')
+          .update({ name: newName })
+          .eq('id', bestMatch.event.id);
+        
+        bestMatch.event.name = newName;
+      }
+
+      return {
+        ...bestMatch.event,
+        hasSourceLink: bestMatch.hasSourceLink
+      };
+    }
+
+    return null;
+  } catch (error) {
+    console.error('Error in findMatchingEvent:', error);
+    return null;
+  }
 } 

@@ -54,8 +54,8 @@ export type SearchResult = {
   metadata: {
     total?: number;
     sources?: {
-      stubhub: TicketSource;
-      vividseats: TicketSource;
+      stubhub?: TicketSource;
+      vividseats?: TicketSource;
     };
     error?: string;
   };

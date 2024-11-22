@@ -12,6 +12,17 @@ export default function TicketResults({ results, isLoading, lastUpdated }: Ticke
     return <div className="mt-8">No tickets found</div>;
   }
 
+  // Function to safely format date
+  const formatDate = (dateStr?: string) => {
+    if (!dateStr) return 'Unknown time';
+    try {
+      return formatDistanceToNow(new Date(dateStr));
+    } catch (error) {
+      console.error('Error formatting date:', dateStr, error);
+      return 'Unknown time';
+    }
+  };
+
   // Sort events by lowest ticket price
   const sortedEvents = [...results.data].sort((a, b) => {
     const aPrice = Math.min(...(a.tickets || []).map(t => t.price));
@@ -19,19 +30,28 @@ export default function TicketResults({ results, isLoading, lastUpdated }: Ticke
     return aPrice - bPrice;
   });
 
-  const getSourceStatus = (source: TicketSource) => {
-    if (source.error) {
+  const getSourceStatus = (source?: TicketSource) => {
+    if (!source) {
       return (
-        <span className="text-red-500 text-xs">
-          Error updating • Last updated {formatDistanceToNow(new Date(source.lastUpdated))} ago
+        <span className="text-gray-500 text-xs">
+          Not available
         </span>
       );
     }
+
+    if (source.error) {
+      return (
+        <span className="text-red-500 text-xs">
+          Error updating • Last updated {formatDate(source.lastUpdated)} ago
+        </span>
+      );
+    }
+
     return source.isLive ? (
       <span className="text-green-500 text-xs">Live prices</span>
     ) : (
       <span className="text-yellow-500 text-xs">
-        Cached • Last updated {formatDistanceToNow(new Date(source.lastUpdated))} ago
+        Cached • Last updated {formatDate(source.lastUpdated)} ago
       </span>
     );
   };
@@ -43,7 +63,7 @@ export default function TicketResults({ results, isLoading, lastUpdated }: Ticke
           Found {results.data.length} events
         </h2>
         <div className="text-sm space-y-1">
-          {results.metadata.sources && (
+          {results.metadata.sources ? (
             <>
               <div>
                 StubHub: {getSourceStatus(results.metadata.sources.stubhub)}
@@ -52,13 +72,16 @@ export default function TicketResults({ results, isLoading, lastUpdated }: Ticke
                 VividSeats: {getSourceStatus(results.metadata.sources.vividseats)}
               </div>
             </>
-          )}
+          ) : null}
         </div>
       </div>
 
       <div className="space-y-8">
         {sortedEvents.map((event) => (
-          <div key={event.id} className="border rounded-lg p-4 shadow-sm">
+          <div 
+            key={`${event.id}-${event.source}`}
+            className="border rounded-lg p-4 shadow-sm"
+          >
             <div className="flex justify-between items-start mb-4">
               <div>
                 <h3 className="text-lg font-semibold">{event.name}</h3>
@@ -71,15 +94,15 @@ export default function TicketResults({ results, isLoading, lastUpdated }: Ticke
               <div className="text-right">
                 <p className="text-sm text-gray-500">Starting from</p>
                 <p className="text-xl font-bold text-green-600">
-                  ${Math.min(...event.tickets.map(t => t.price))}
+                  ${Math.min(...(event.tickets || []).map(t => t.price))}
                 </p>
               </div>
             </div>
 
             <div className="grid gap-2">
-              {event.tickets.map((ticket) => (
+              {event.tickets?.map((ticket) => (
                 <div 
-                  key={ticket.id} 
+                  key={`${ticket.id || ticket.listingId}-${ticket.source}-${ticket.section}-${ticket.price}`}
                   className={`flex justify-between items-center p-2 rounded transition-colors ${
                     ticket.source === 'stubhub' 
                       ? 'bg-blue-50 hover:bg-blue-100' 
@@ -92,9 +115,10 @@ export default function TicketResults({ results, isLoading, lastUpdated }: Ticke
                       {ticket.row ? ` • Row ${ticket.row}` : ''}
                       {ticket.dealScore ? ` • Deal Score: ${ticket.dealScore}` : ''}
                     </p>
-                    {!results.metadata.sources?.[ticket.source]?.isLive && (
+                    {results.metadata.sources?.[ticket.source] && 
+                     !results.metadata.sources[ticket.source]?.isLive && (
                       <p className="text-xs text-yellow-600">
-                        Price from {formatDistanceToNow(new Date(results.metadata.sources?.[ticket.source]?.lastUpdated))} ago
+                        Price from {formatDate(results.metadata.sources[ticket.source]?.lastUpdated)} ago
                       </p>
                     )}
                   </div>
