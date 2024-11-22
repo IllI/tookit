@@ -51,28 +51,32 @@ export default function TicketResults({ results, isLoading, lastUpdated }: Ticke
             </div>
 
             <div className="space-y-2">
-              {event.tickets?.sections?.map((section) => (
-                <div key={section.section} className="border-t pt-2">
-                  <h4 className="font-medium text-gray-700">{section.section}</h4>
-                  <div className="space-y-1">
-                    {section.tickets.map((ticket, idx) => (
-                      <div 
-                        key={ticket.listingId || idx} 
-                        className="flex justify-between items-center p-2 bg-gray-50 rounded"
-                      >
-                        <div>
-                          <p className="text-sm text-gray-600">
-                            {ticket.quantity} • 
-                            {ticket.row ? ` Row ${ticket.row} • ` : ' '}
-                            {ticket.dealScore ? `Deal Score: ${ticket.dealScore}` : ''}
-                          </p>
-                        </div>
-                        <div className="text-right">
-                          <p className="font-semibold">${ticket.rawPrice}</p>
-                          <p className="text-xs text-gray-500">{event.source}</p>
-                        </div>
-                      </div>
-                    ))}
+              {event.tickets?.map((ticket) => (
+                <div 
+                  key={ticket.listingId || ticket.id} 
+                  className="flex justify-between items-center p-2 bg-gray-50 rounded hover:bg-gray-100 transition-colors"
+                >
+                  <div>
+                    <p className="text-sm text-gray-600">
+                      {ticket.section} • {ticket.quantity} tickets
+                      {ticket.row ? ` • Row ${ticket.row}` : ''}
+                      {ticket.dealScore ? ` • Deal Score: ${ticket.dealScore}` : ''}
+                    </p>
+                  </div>
+                  <div className="text-right">
+                    <a
+                      href={ticket.url || ticket.listingUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-block"
+                    >
+                      <p className="font-semibold text-blue-600 hover:text-blue-800">
+                        ${ticket.rawPrice || ticket.price}
+                      </p>
+                      <p className="text-xs text-gray-500">
+                        Buy on {ticket.source}
+                      </p>
+                    </a>
                   </div>
                 </div>
               ))}

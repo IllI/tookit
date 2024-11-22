@@ -2,7 +2,7 @@ import StubHubSearcher from '@/src/stub-hub';
 import VividSeatsSearcher from '@/src/vivid-seats';
 import { createClient } from '@supabase/supabase-js';
 import { config } from '@/src/config/env';
-import type { SearchParams, SearchResult, Event } from '../types/api';
+import type { SearchParams, SearchResult, Event, Ticket } from '../types/api';
 
 export class SearchService {
   private supabase;
@@ -56,20 +56,52 @@ export class SearchService {
     }
   }
 
+  private transformEventData(event: any): Event {
+    // Transform sections into tickets array
+    const tickets: Ticket[] = event.tickets?.sections?.flatMap((section: any) =>
+      section.tickets.map((ticket: any) => ({
+        id: ticket.listingId || `${event.id}-${ticket.rawPrice}-${section.section}`,
+        eventId: event.id,
+        price: ticket.rawPrice,
+        section: section.section,
+        row: ticket.row,
+        quantity: parseInt(ticket.quantity) || 1,
+        source: event.source,
+        url: ticket.listingUrl || ticket.url,
+        listingId: ticket.listingId,
+        rawPrice: ticket.rawPrice,
+        dealScore: ticket.dealScore,
+        rawData: ticket
+      }))
+    ) || [];
+
+    return {
+      id: event.id,
+      name: event.name || event.title,
+      date: event.date,
+      venue: event.venue,
+      type: event.type || 'Concert',
+      category: event.category || 'Concert',
+      tickets
+    };
+  }
+
   private async searchStubHub(params: SearchParams): Promise<Event[]> {
-    return this.stubHubSearcher.searchConcerts(
+    const events = await this.stubHubSearcher.searchConcerts(
       params.artist || params.keyword || '',
       params.venue || '',
       params.location || ''
     );
+    return events.map(event => this.transformEventData(event));
   }
 
   private async searchVividSeats(params: SearchParams): Promise<Event[]> {
-    return this.vividSeatsSearcher.searchConcerts(
+    const events = await this.vividSeatsSearcher.searchConcerts(
       params.artist || params.keyword || '',
       params.venue || '',
       params.location || ''
     );
+    return events.map(event => this.transformEventData(event));
   }
 }
 

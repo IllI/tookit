@@ -34,6 +34,10 @@ export type Ticket = {
   quantity: number;
   source: string;
   url: string;
+  listingUrl?: string;
+  listingId?: string;
+  rawPrice: number;
+  dealScore?: string;
   rawData?: any;
 };
 
