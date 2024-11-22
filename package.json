@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "next lint",
     "search-stubhub": "node src/run-stub-hub.js",
-    "search-vividseats": "node src/run-vivid-seats.js"
+    "search-vividseats": "node src/run-vivid-seats.js",
+    "deploy:edge": "supabase functions deploy search"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.46.1",
