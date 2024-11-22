@@ -24,14 +24,19 @@ export default async function handler(
       source: 'all'
     });
 
-    return res.status(result.success ? 200 : 500).json(result);
+    if (!result.success) {
+      logger.error('Search failed:', result.error);
+      return res.status(500).json(result);
+    }
+
+    return res.status(200).json(result);
   } catch (error) {
     logger.error('API error:', error);
     return res.status(500).json({
       success: false,
-      error: 'Internal server error',
+      error: error instanceof Error ? error.message : 'Internal server error',
       metadata: {
-        error: error instanceof Error ? error.message : 'Unknown error'
+        error: error instanceof Error ? error.stack : 'Unknown error'
       }
     });
   }

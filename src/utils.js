@@ -3,14 +3,15 @@ import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import chromium from '@sparticuz/chromium';
 
 const isDev = process.env.NODE_ENV === 'development';
-const isVercel = process.env.VERCEL === '1';
-
-puppeteer.use(StealthPlugin());
+const isRender = process.env.RENDER === '1';
 
 async function setupBrowser() {
-  if (isDev && !isVercel) {
-    // Development setup (visible browser for debugging)
-    return await puppeteer.launch({
+  if (isDev && !isRender) {
+    // Development setup
+    const puppeteerWithStealth = puppeteer;
+    puppeteerWithStealth.use(StealthPlugin());
+    
+    return await puppeteerWithStealth.launch({
       headless: false,
       args: [
         '--no-sandbox',
@@ -23,8 +24,13 @@ async function setupBrowser() {
       defaultViewport: { width: 1920, height: 1080 }
     });
   } else {
-    // Production (Vercel) setup or when explicitly needed
-    return await puppeteer.launch({
+    // Production setup
+    const executablePath = await chromium.executablePath();
+    
+    const puppeteerWithStealth = puppeteer;
+    puppeteerWithStealth.use(StealthPlugin());
+    
+    return await puppeteerWithStealth.launch({
       args: [
         ...chromium.args,
         '--hide-scrollbars',
@@ -33,8 +39,8 @@ async function setupBrowser() {
         '--disable-blink-features=AutomationControlled'
       ],
       defaultViewport: chromium.defaultViewport,
-      executablePath: await chromium.executablePath(),
-      headless: "new", // Use new headless mode
+      executablePath,
+      headless: chromium.headless,
       ignoreHTTPSErrors: true,
     });
   }
