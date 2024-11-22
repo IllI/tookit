@@ -1,23 +1,36 @@
-import puppeteer from 'puppeteer-extra';
+import puppeteer from 'puppeteer-core';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
-import { executablePath } from 'puppeteer';
+import chromium from '@sparticuz/chromium';
+
+const isDev = process.env.NODE_ENV === 'development';
 
 puppeteer.use(StealthPlugin());
 
 async function setupBrowser() {
-  return await puppeteer.launch({
-    headless: false,
-    executablePath: executablePath(),
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-blink-features=AutomationControlled',
-      '--window-size=1920,1080',
-      '--disable-features=site-per-process',
-      '--disable-web-security'
-    ],
-    defaultViewport: { width: 1920, height: 1080 }
-  });
+  if (isDev) {
+    // Development setup (unchanged)
+    return await puppeteer.launch({
+      headless: false,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-blink-features=AutomationControlled',
+        '--window-size=1920,1080',
+        '--disable-features=site-per-process',
+        '--disable-web-security'
+      ],
+      defaultViewport: { width: 1920, height: 1080 }
+    });
+  } else {
+    // Production (Vercel) setup
+    return await puppeteer.launch({
+      args: chromium.args,
+      defaultViewport: chromium.defaultViewport,
+      executablePath: await chromium.executablePath(),
+      headless: chromium.headless,
+      ignoreHTTPSErrors: true,
+    });
+  }
 }
 
 async function setupPage(browser) {
