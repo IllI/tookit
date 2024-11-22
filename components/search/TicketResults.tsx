@@ -1,4 +1,4 @@
-import { SearchResult, Event, Ticket } from '@/lib/types/api';
+import { SearchResult, Event, Ticket, TicketSource } from '@/lib/types/api';
 import { formatDistanceToNow } from 'date-fns';
 
 interface TicketResultsProps {
@@ -14,10 +14,27 @@ export default function TicketResults({ results, isLoading, lastUpdated }: Ticke
 
   // Sort events by lowest ticket price
   const sortedEvents = [...results.data].sort((a, b) => {
-    const aPrice = Math.min(...(a.tickets?.sections || []).flatMap(s => s.tickets.map(t => t.rawPrice)));
-    const bPrice = Math.min(...(b.tickets?.sections || []).flatMap(s => s.tickets.map(t => t.rawPrice)));
+    const aPrice = Math.min(...(a.tickets || []).map(t => t.price));
+    const bPrice = Math.min(...(b.tickets || []).map(t => t.price));
     return aPrice - bPrice;
   });
+
+  const getSourceStatus = (source: TicketSource) => {
+    if (source.error) {
+      return (
+        <span className="text-red-500 text-xs">
+          Error updating • Last updated {formatDistanceToNow(new Date(source.lastUpdated))} ago
+        </span>
+      );
+    }
+    return source.isLive ? (
+      <span className="text-green-500 text-xs">Live prices</span>
+    ) : (
+      <span className="text-yellow-500 text-xs">
+        Cached • Last updated {formatDistanceToNow(new Date(source.lastUpdated))} ago
+      </span>
+    );
+  };
 
   return (
     <div className="mt-8">
@@ -25,8 +42,17 @@ export default function TicketResults({ results, isLoading, lastUpdated }: Ticke
         <h2 className="text-xl font-semibold">
           Found {results.data.length} events
         </h2>
-        <div className="text-sm text-gray-500">
-          Last updated {formatDistanceToNow(lastUpdated)} ago
+        <div className="text-sm space-y-1">
+          {results.metadata.sources && (
+            <>
+              <div>
+                StubHub: {getSourceStatus(results.metadata.sources.stubhub)}
+              </div>
+              <div>
+                VividSeats: {getSourceStatus(results.metadata.sources.vividseats)}
+              </div>
+            </>
+          )}
         </div>
       </div>
 
@@ -45,16 +71,20 @@ export default function TicketResults({ results, isLoading, lastUpdated }: Ticke
               <div className="text-right">
                 <p className="text-sm text-gray-500">Starting from</p>
                 <p className="text-xl font-bold text-green-600">
-                  ${Math.min(...(event.tickets?.sections || []).flatMap(s => s.tickets.map(t => t.rawPrice)))}
+                  ${Math.min(...event.tickets.map(t => t.price))}
                 </p>
               </div>
             </div>
 
-            <div className="space-y-2">
-              {event.tickets?.map((ticket) => (
+            <div className="grid gap-2">
+              {event.tickets.map((ticket) => (
                 <div 
-                  key={ticket.listingId || ticket.id} 
-                  className="flex justify-between items-center p-2 bg-gray-50 rounded hover:bg-gray-100 transition-colors"
+                  key={ticket.id} 
+                  className={`flex justify-between items-center p-2 rounded transition-colors ${
+                    ticket.source === 'stubhub' 
+                      ? 'bg-blue-50 hover:bg-blue-100' 
+                      : 'bg-purple-50 hover:bg-purple-100'
+                  }`}
                 >
                   <div>
                     <p className="text-sm text-gray-600">
@@ -62,16 +92,21 @@ export default function TicketResults({ results, isLoading, lastUpdated }: Ticke
                       {ticket.row ? ` • Row ${ticket.row}` : ''}
                       {ticket.dealScore ? ` • Deal Score: ${ticket.dealScore}` : ''}
                     </p>
+                    {!results.metadata.sources?.[ticket.source]?.isLive && (
+                      <p className="text-xs text-yellow-600">
+                        Price from {formatDistanceToNow(new Date(results.metadata.sources?.[ticket.source]?.lastUpdated))} ago
+                      </p>
+                    )}
                   </div>
                   <div className="text-right">
                     <a
-                      href={ticket.url || ticket.listingUrl}
+                      href={ticket.url}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="inline-block"
                     >
                       <p className="font-semibold text-blue-600 hover:text-blue-800">
-                        ${ticket.rawPrice || ticket.price}
+                        ${ticket.price}
                       </p>
                       <p className="text-xs text-gray-500">
                         Buy on {ticket.source}

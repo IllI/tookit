@@ -41,6 +41,12 @@ export type Ticket = {
   rawData?: any;
 };
 
+export type TicketSource = {
+  lastUpdated: string;
+  isLive: boolean;
+  error?: string;
+};
+
 export type SearchResult = {
   success: boolean;
   data?: Event[];
@@ -48,8 +54,8 @@ export type SearchResult = {
   metadata: {
     total?: number;
     sources?: {
-      stubhub: number;
-      vividseats: number;
+      stubhub: TicketSource;
+      vividseats: TicketSource;
     };
     error?: string;
   };
