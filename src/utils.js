@@ -7,33 +7,17 @@ const isDev = process.env.NODE_ENV === 'development';
 const isRender = process.env.RENDER === '1' || process.env.RENDER === 'true';
 const isDebug = process.argv.includes('--debug');
 
+const USER_AGENT = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/95.0.4638.69 Safari/537.36';
+
 async function setupBrowser() {
   try {
     // Add stealth plugin to puppeteer
     const puppeteerExtra = addExtra(puppeteer);
     puppeteerExtra.use(StealthPlugin());
 
-    // Check for Chrome binary
-    let browserPath = process.env.CHROME_PATH || '/usr/bin/google-chrome-stable';
-    if (process.platform === 'linux') {
-      try {
-        console.log('Checking for Chrome binary:');
-        const output = execSync('which google-chrome-stable').toString().trim();
-        if (output) {
-          browserPath = output;
-          console.log('Found Chrome at:', output);
-          
-          const version = execSync(`${output} --version`).toString().trim();
-          console.log('Chrome version:', version);
-        }
-      } catch (error) {
-        console.error('Error checking Chrome:', error);
-      }
-    }
-
     const launchOptions = {
       headless: "new",
-      executablePath: browserPath,
+      executablePath: '/usr/bin/google-chrome-stable',
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -48,7 +32,8 @@ async function setupBrowser() {
         '--disable-dev-shm-usage',
         '--disable-accelerated-2d-canvas',
         '--disable-gpu',
-        '--hide-scrollbars'
+        '--hide-scrollbars',
+        `--user-agent=${USER_AGENT}`
       ],
       ignoreDefaultArgs: ['--enable-automation'],
       defaultViewport: { width: 1920, height: 1080 }
@@ -59,6 +44,7 @@ async function setupBrowser() {
       isRender,
       isDebug,
       executablePath: launchOptions.executablePath,
+      userAgent: USER_AGENT,
       platform: process.platform,
       env: {
         NODE_ENV: process.env.NODE_ENV,
@@ -96,6 +82,9 @@ async function setupBrowser() {
 async function setupPage(browser) {
   const page = await browser.newPage();
   
+  // Set user agent before anything else
+  await page.setUserAgent(USER_AGENT);
+  
   // Enhanced stealth settings
   await page.evaluateOnNewDocument(() => {
     // Overwrite navigator properties
@@ -118,7 +107,7 @@ async function setupPage(browser) {
           }
         ]
       },
-      platform: { get: () => 'Win32' },
+      platform: { get: () => 'Linux x86_64' },
       vendor: { get: () => 'Google Inc.' }
     });
 
@@ -169,27 +158,6 @@ async function setupPage(browser) {
         }
       }
     };
-
-    // Modify permissions API
-    const originalQuery = window.navigator.permissions?.query;
-    window.navigator.permissions.query = (parameters) => (
-      parameters.name === 'notifications' ?
-        Promise.resolve({ state: Notification.permission }) :
-        originalQuery(parameters)
-    );
-
-    // Add WebGL properties
-    const getParameter = WebGLRenderingContext.prototype.getParameter;
-    WebGLRenderingContext.prototype.getParameter = function(parameter) {
-      // Spoof renderer info
-      if (parameter === 37445) {
-        return 'Intel Inc.';
-      }
-      if (parameter === 37446) {
-        return 'Intel Iris OpenGL Engine';
-      }
-      return getParameter.apply(this, [parameter]);
-    };
   });
 
   // Set convincing headers
@@ -199,15 +167,13 @@ async function setupPage(browser) {
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
     'Connection': 'keep-alive',
     'Upgrade-Insecure-Requests': '1',
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+    'sec-ch-ua': '"Google Chrome";v="95", " Not A;Brand";v="99", "Chromium";v="95"',
     'sec-ch-ua-mobile': '?0',
-    'sec-ch-ua-platform': '"Windows"'
+    'sec-ch-ua-platform': '"Linux"'
   });
 
-  // Set viewport and user agent
+  // Set viewport
   await page.setViewport({ width: 1920, height: 1080 });
-  await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
 
   // Add additional page configurations
   await page.setDefaultNavigationTimeout(60000);
