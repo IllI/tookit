@@ -3,7 +3,7 @@ import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import { addExtra } from 'puppeteer-extra';
 
 const isDev = process.env.NODE_ENV === 'development';
-const isRender = process.env.RENDER === '1';
+const isRender = process.env.RENDER === '1' || process.env.RENDER === 'true';
 const isDebug = process.argv.includes('--debug');
 
 async function setupBrowser() {
@@ -27,23 +27,17 @@ async function setupBrowser() {
         '--disable-renderer-backgrounding',
         '--disable-dev-shm-usage',
         '--disable-accelerated-2d-canvas',
-        '--disable-gpu'
+        '--disable-gpu',
+        '--hide-scrollbars'
       ],
       ignoreDefaultArgs: ['--enable-automation'],
       defaultViewport: { width: 1920, height: 1080 }
     };
 
-    // Add production-specific options
+    // Always set executablePath in production or on Render
     if (!isDev || isRender) {
-      launchOptions.args.push(
-        '--hide-scrollbars'
-      );
-      
-      // Use system Chromium on Render.com
-      if (isRender) {
-        launchOptions.executablePath = '/usr/bin/chromium';
-        console.log('Using Render.com system Chromium');
-      }
+      launchOptions.executablePath = '/usr/bin/chromium';
+      console.log('Using system Chromium at:', launchOptions.executablePath);
     }
 
     console.log('Launching browser with options:', {
@@ -51,7 +45,11 @@ async function setupBrowser() {
       isRender,
       isDebug,
       executablePath: launchOptions.executablePath || 'default',
-      platform: process.platform
+      platform: process.platform,
+      env: {
+        NODE_ENV: process.env.NODE_ENV,
+        RENDER: process.env.RENDER
+      }
     });
 
     const browser = await puppeteerExtra.launch(launchOptions);
@@ -69,7 +67,11 @@ async function setupBrowser() {
       isDev,
       isRender,
       isDebug,
-      platform: process.platform
+      platform: process.platform,
+      env: {
+        NODE_ENV: process.env.NODE_ENV,
+        RENDER: process.env.RENDER
+      }
     });
     throw error;
   }
