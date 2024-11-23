@@ -13,7 +13,7 @@ async function setupBrowser() {
     puppeteerExtra.use(StealthPlugin());
 
     const launchOptions = {
-      headless: !isDebug,
+      headless: "new",
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -38,11 +38,29 @@ async function setupBrowser() {
       launchOptions.args.push(
         '--hide-scrollbars'
       );
-      launchOptions.headless = true;
+      
+      // Use system Chromium on Render.com
+      if (isRender) {
+        launchOptions.executablePath = '/usr/bin/chromium';
+        console.log('Using Render.com system Chromium');
+      }
     }
+
+    console.log('Launching browser with options:', {
+      isDev,
+      isRender,
+      isDebug,
+      executablePath: launchOptions.executablePath || 'default',
+      platform: process.platform
+    });
 
     const browser = await puppeteerExtra.launch(launchOptions);
     console.log('Browser launched successfully in', isDebug ? 'visible' : 'headless', 'mode');
+    
+    // Log browser version for debugging
+    const version = await browser.version();
+    console.log('Browser version:', version);
+
     return browser;
 
   } catch (error) {
