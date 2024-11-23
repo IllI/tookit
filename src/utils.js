@@ -1,7 +1,6 @@
 import puppeteer from 'puppeteer';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import { addExtra } from 'puppeteer-extra';
-import { execSync } from 'child_process';
 
 const isDev = process.env.NODE_ENV === 'development';
 const isRender = process.env.RENDER === '1' || process.env.RENDER === 'true';
@@ -17,7 +16,6 @@ async function setupBrowser() {
 
     const launchOptions = {
       headless: "new",
-      executablePath: isRender ? '/opt/google/chrome/chrome' : undefined,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -43,13 +41,11 @@ async function setupBrowser() {
       isDev,
       isRender,
       isDebug,
-      executablePath: launchOptions.executablePath,
-      userAgent: USER_AGENT,
+      cacheDir: process.env.PUPPETEER_CACHE_DIR,
       platform: process.platform,
       env: {
         NODE_ENV: process.env.NODE_ENV,
-        RENDER: process.env.RENDER,
-        CHROME_PATH: process.env.CHROME_PATH
+        RENDER: process.env.RENDER
       }
     });
 
@@ -72,7 +68,7 @@ async function setupBrowser() {
       env: {
         NODE_ENV: process.env.NODE_ENV,
         RENDER: process.env.RENDER,
-        CHROME_PATH: process.env.CHROME_PATH
+        PUPPETEER_CACHE_DIR: process.env.PUPPETEER_CACHE_DIR
       }
     });
     throw error;
