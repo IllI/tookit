@@ -17,7 +17,7 @@ async function setupBrowser() {
 
     const launchOptions = {
       headless: "new",
-      executablePath: '/usr/bin/google-chrome-stable',
+      executablePath: isRender ? '/opt/google/chrome/chrome' : undefined,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
