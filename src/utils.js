@@ -13,21 +13,21 @@ async function setupBrowser() {
     const puppeteerExtra = addExtra(puppeteer);
     puppeteerExtra.use(StealthPlugin());
 
-    // Check for browser binary
-    let browserPath = '/usr/bin/chromium-browser';
+    // Check for Chrome binary
+    let browserPath = process.env.CHROME_PATH || '/usr/bin/google-chrome';
     if (process.platform === 'linux') {
       try {
-        console.log('Checking for browser binary:');
-        const output = execSync('which chromium-browser').toString().trim();
+        console.log('Checking for Chrome binary:');
+        const output = execSync('which google-chrome').toString().trim();
         if (output) {
           browserPath = output;
-          console.log('Found browser at:', output);
+          console.log('Found Chrome at:', output);
           
           const version = execSync(`${output} --version`).toString().trim();
-          console.log('Browser version:', version);
+          console.log('Chrome version:', version);
         }
       } catch (error) {
-        console.error('Error checking browser:', error);
+        console.error('Error checking Chrome:', error);
       }
     }
 
