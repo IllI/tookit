@@ -13,17 +13,17 @@ async function setupBrowser() {
     const puppeteerExtra = addExtra(puppeteer);
     puppeteerExtra.use(StealthPlugin());
 
-    // Check for Chrome on Linux
+    // Check for Chromium on Linux
     if (process.platform === 'linux') {
       try {
-        console.log('Checking for Chrome binary:');
-        const whichOutput = execSync('which google-chrome').toString();
+        console.log('Checking for Chromium binary:');
+        const whichOutput = execSync('which chromium').toString();
         console.log('which output:', whichOutput);
         
-        const versionOutput = execSync('google-chrome --version').toString();
+        const versionOutput = execSync('chromium --version').toString();
         console.log('version output:', versionOutput);
       } catch (error) {
-        console.error('Error checking Chrome:', error);
+        console.error('Error checking Chromium:', error);
       }
     }
 
@@ -49,10 +49,10 @@ async function setupBrowser() {
       defaultViewport: { width: 1920, height: 1080 }
     };
 
-    // Set Chrome path in production or on Render
+    // Set Chromium path in production or on Render
     if (!isDev || isRender) {
-      launchOptions.executablePath = '/usr/bin/google-chrome';
-      console.log('Using Chrome at:', launchOptions.executablePath);
+      launchOptions.executablePath = '/usr/bin/chromium';
+      console.log('Using Chromium at:', launchOptions.executablePath);
     }
 
     console.log('Launching browser with options:', {
