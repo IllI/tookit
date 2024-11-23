@@ -1,13 +1,12 @@
 import puppeteer from 'puppeteer';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import { addExtra } from 'puppeteer-extra';
-import path from 'path';
 
 const isDev = process.env.NODE_ENV === 'development';
 const isRender = process.env.RENDER === '1' || process.env.RENDER === 'true';
 const isDebug = process.argv.includes('--debug');
 
-const USER_AGENT = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/95.0.4638.69 Safari/537.36';
+const USER_AGENT = 'Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/115.0';
 
 async function setupBrowser() {
   try {
@@ -15,35 +14,18 @@ async function setupBrowser() {
     const puppeteerExtra = addExtra(puppeteer);
     puppeteerExtra.use(StealthPlugin());
 
-    // Determine browser path
-    let executablePath;
-    if (isRender) {
-      const cacheDir = process.env.PUPPETEER_CACHE_DIR || '/opt/render/project/.cache/puppeteer';
-      executablePath = path.join(cacheDir, 'chrome', 'linux-1108766', 'chrome-linux', 'chrome');
-      console.log('Using Chrome at:', executablePath);
-    }
-
     const launchOptions = {
+      product: 'firefox',
       headless: "new",
-      executablePath,
+      executablePath: isRender ? '/usr/bin/firefox-esr' : undefined,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
-        '--disable-blink-features=AutomationControlled',
-        '--disable-features=IsolateOrigins,site-per-process',
-        '--disable-web-security',
-        '--disable-sync',
-        '--window-size=1920,1080',
-        '--disable-background-timer-throttling',
-        '--disable-backgrounding-occluded-windows',
-        '--disable-renderer-backgrounding',
         '--disable-dev-shm-usage',
         '--disable-accelerated-2d-canvas',
         '--disable-gpu',
-        '--hide-scrollbars',
-        `--user-agent=${USER_AGENT}`
+        '--window-size=1920,1080'
       ],
-      ignoreDefaultArgs: ['--enable-automation'],
       defaultViewport: { width: 1920, height: 1080 }
     };
 
@@ -52,11 +34,12 @@ async function setupBrowser() {
       isRender,
       isDebug,
       executablePath: launchOptions.executablePath,
-      cacheDir: process.env.PUPPETEER_CACHE_DIR,
+      product: launchOptions.product,
       platform: process.platform,
       env: {
         NODE_ENV: process.env.NODE_ENV,
-        RENDER: process.env.RENDER
+        RENDER: process.env.RENDER,
+        FIREFOX_PATH: process.env.FIREFOX_PATH
       }
     });
 
@@ -79,7 +62,7 @@ async function setupBrowser() {
       env: {
         NODE_ENV: process.env.NODE_ENV,
         RENDER: process.env.RENDER,
-        PUPPETEER_CACHE_DIR: process.env.PUPPETEER_CACHE_DIR
+        FIREFOX_PATH: process.env.FIREFOX_PATH
       }
     });
     throw error;
