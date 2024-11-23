@@ -36,7 +36,7 @@ async function setupBrowser() {
 
     // Always set executablePath in production or on Render
     if (!isDev || isRender) {
-      launchOptions.executablePath = '/usr/bin/chromium';
+      launchOptions.executablePath = '/usr/bin/chromium-browser';
       console.log('Using system Chromium at:', launchOptions.executablePath);
     }
 
