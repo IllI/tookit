@@ -9,16 +9,17 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "postinstall": "npx puppeteer browsers install chrome"
   },
   "dependencies": {
     "@supabase/supabase-js": "2.39.0",
     "date-fns": "2.30.0",
     "dotenv": "16.3.1",
     "next": "13.5.6",
-    "puppeteer": "19.11.1",
-    "puppeteer-extra": "3.3.4",
-    "puppeteer-extra-plugin-stealth": "2.11.1",
+    "puppeteer": "21.5.0",
+    "puppeteer-extra": "3.3.6",
+    "puppeteer-extra-plugin-stealth": "2.11.2",
     "react": "18.2.0",
     "react-dom": "18.2.0",
     "typescript": "5.0.4"

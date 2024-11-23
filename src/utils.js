@@ -40,6 +40,8 @@ async function setupBrowser() {
       isDev,
       isRender,
       isDebug,
+      cacheDir: process.env.PUPPETEER_CACHE_DIR,
+      downloadPath: process.env.PUPPETEER_DOWNLOAD_PATH,
       platform: process.platform,
       env: {
         NODE_ENV: process.env.NODE_ENV,
@@ -65,7 +67,9 @@ async function setupBrowser() {
       platform: process.platform,
       env: {
         NODE_ENV: process.env.NODE_ENV,
-        RENDER: process.env.RENDER
+        RENDER: process.env.RENDER,
+        PUPPETEER_CACHE_DIR: process.env.PUPPETEER_CACHE_DIR,
+        PUPPETEER_DOWNLOAD_PATH: process.env.PUPPETEER_DOWNLOAD_PATH
       }
     });
     throw error;
