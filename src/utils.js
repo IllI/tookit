@@ -17,10 +17,10 @@ async function setupBrowser() {
     if (process.platform === 'linux') {
       try {
         console.log('Checking for Chromium binary:');
-        const whichOutput = execSync('which chromium').toString();
+        const whichOutput = execSync('which chromium-browser').toString();
         console.log('which output:', whichOutput);
         
-        const versionOutput = execSync('chromium --version').toString();
+        const versionOutput = execSync('chromium-browser --version').toString();
         console.log('version output:', versionOutput);
       } catch (error) {
         console.error('Error checking Chromium:', error);
@@ -51,7 +51,7 @@ async function setupBrowser() {
 
     // Set Chromium path in production or on Render
     if (!isDev || isRender) {
-      launchOptions.executablePath = '/usr/bin/chromium';
+      launchOptions.executablePath = '/usr/bin/chromium-browser';
       console.log('Using Chromium at:', launchOptions.executablePath);
     }
 
