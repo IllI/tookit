@@ -1,6 +1,7 @@
 import puppeteer from 'puppeteer';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import { addExtra } from 'puppeteer-extra';
+import path from 'path';
 
 const isDev = process.env.NODE_ENV === 'development';
 const isRender = process.env.RENDER === '1' || process.env.RENDER === 'true';
@@ -14,8 +15,17 @@ async function setupBrowser() {
     const puppeteerExtra = addExtra(puppeteer);
     puppeteerExtra.use(StealthPlugin());
 
+    // Determine browser path
+    let executablePath;
+    if (isRender) {
+      const cacheDir = process.env.PUPPETEER_CACHE_DIR || '/opt/render/project/.cache/puppeteer';
+      executablePath = path.join(cacheDir, 'chrome', 'linux-1108766', 'chrome-linux', 'chrome');
+      console.log('Using Chrome at:', executablePath);
+    }
+
     const launchOptions = {
       headless: "new",
+      executablePath,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -41,6 +51,7 @@ async function setupBrowser() {
       isDev,
       isRender,
       isDebug,
+      executablePath: launchOptions.executablePath,
       cacheDir: process.env.PUPPETEER_CACHE_DIR,
       platform: process.platform,
       env: {
