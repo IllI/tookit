@@ -14,14 +14,33 @@ async function setupBrowser() {
     puppeteerExtra.use(StealthPlugin());
 
     // Check for Chromium on Linux
+    let chromiumPath = '/usr/bin/chromium';
     if (process.platform === 'linux') {
       try {
-        console.log('Checking for Chromium binary:');
-        const whichOutput = execSync('which chromium-browser').toString();
-        console.log('which output:', whichOutput);
-        
-        const versionOutput = execSync('chromium-browser --version').toString();
-        console.log('version output:', versionOutput);
+        console.log('Checking for Chromium binaries:');
+        // Try multiple possible binary names
+        const possibleBinaries = ['chromium', 'chromium-browser', 'chrome', 'google-chrome'];
+        for (const binary of possibleBinaries) {
+          try {
+            const output = execSync(`which ${binary}`).toString().trim();
+            console.log(`Found ${binary} at:`, output);
+            if (output) {
+              chromiumPath = output;
+              break;
+            }
+          } catch (e) {
+            console.log(`${binary} not found`);
+          }
+        }
+
+        // List all Chrome/Chromium binaries
+        console.log('Available Chrome/Chromium binaries:');
+        try {
+          const binaries = execSync('find /usr/bin -name "*chrom*"').toString();
+          console.log(binaries);
+        } catch (e) {
+          console.log('Error listing binaries:', e.message);
+        }
       } catch (error) {
         console.error('Error checking Chromium:', error);
       }
@@ -51,8 +70,8 @@ async function setupBrowser() {
 
     // Set Chromium path in production or on Render
     if (!isDev || isRender) {
-      launchOptions.executablePath = '/usr/bin/chromium-browser';
-      console.log('Using Chromium at:', launchOptions.executablePath);
+      launchOptions.executablePath = chromiumPath;
+      console.log('Using Chromium at:', chromiumPath);
     }
 
     console.log('Launching browser with options:', {
