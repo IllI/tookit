@@ -13,41 +13,27 @@ async function setupBrowser() {
     const puppeteerExtra = addExtra(puppeteer);
     puppeteerExtra.use(StealthPlugin());
 
-    // Check for Chromium on Linux
-    let chromiumPath = '/usr/bin/chromium';
+    // Check for browser binary
+    let browserPath = '/usr/bin/chromium-browser';
     if (process.platform === 'linux') {
       try {
-        console.log('Checking for Chromium binaries:');
-        // Try multiple possible binary names
-        const possibleBinaries = ['chromium', 'chromium-browser', 'chrome', 'google-chrome'];
-        for (const binary of possibleBinaries) {
-          try {
-            const output = execSync(`which ${binary}`).toString().trim();
-            console.log(`Found ${binary} at:`, output);
-            if (output) {
-              chromiumPath = output;
-              break;
-            }
-          } catch (e) {
-            console.log(`${binary} not found`);
-          }
-        }
-
-        // List all Chrome/Chromium binaries
-        console.log('Available Chrome/Chromium binaries:');
-        try {
-          const binaries = execSync('find /usr/bin -name "*chrom*"').toString();
-          console.log(binaries);
-        } catch (e) {
-          console.log('Error listing binaries:', e.message);
+        console.log('Checking for browser binary:');
+        const output = execSync('which chromium-browser').toString().trim();
+        if (output) {
+          browserPath = output;
+          console.log('Found browser at:', output);
+          
+          const version = execSync(`${output} --version`).toString().trim();
+          console.log('Browser version:', version);
         }
       } catch (error) {
-        console.error('Error checking Chromium:', error);
+        console.error('Error checking browser:', error);
       }
     }
 
     const launchOptions = {
       headless: "new",
+      executablePath: browserPath,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -68,17 +54,11 @@ async function setupBrowser() {
       defaultViewport: { width: 1920, height: 1080 }
     };
 
-    // Set Chromium path in production or on Render
-    if (!isDev || isRender) {
-      launchOptions.executablePath = chromiumPath;
-      console.log('Using Chromium at:', chromiumPath);
-    }
-
     console.log('Launching browser with options:', {
       isDev,
       isRender,
       isDebug,
-      executablePath: launchOptions.executablePath || 'default',
+      executablePath: launchOptions.executablePath,
       platform: process.platform,
       env: {
         NODE_ENV: process.env.NODE_ENV,
