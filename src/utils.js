@@ -6,7 +6,7 @@ const isDev = process.env.NODE_ENV === 'development';
 const isRender = process.env.RENDER === '1' || process.env.RENDER === 'true';
 const isDebug = process.argv.includes('--debug');
 
-const USER_AGENT = 'Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/115.0';
+const USER_AGENT = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/95.0.4638.69 Safari/537.36';
 
 async function setupBrowser() {
   try {
@@ -15,17 +15,24 @@ async function setupBrowser() {
     puppeteerExtra.use(StealthPlugin());
 
     const launchOptions = {
-      product: 'firefox',
       headless: "new",
-      executablePath: isRender ? '/usr/bin/firefox-esr' : undefined,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
         '--disable-accelerated-2d-canvas',
         '--disable-gpu',
-        '--window-size=1920,1080'
+        '--window-size=1920,1080',
+        '--disable-web-security',
+        '--disable-features=IsolateOrigins,site-per-process',
+        '--allow-running-insecure-content',
+        '--disable-blink-features=AutomationControlled',
+        '--disable-sync',
+        '--disable-background-timer-throttling',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-renderer-backgrounding'
       ],
+      ignoreDefaultArgs: ['--enable-automation'],
       defaultViewport: { width: 1920, height: 1080 }
     };
 
@@ -33,13 +40,10 @@ async function setupBrowser() {
       isDev,
       isRender,
       isDebug,
-      executablePath: launchOptions.executablePath,
-      product: launchOptions.product,
       platform: process.platform,
       env: {
         NODE_ENV: process.env.NODE_ENV,
-        RENDER: process.env.RENDER,
-        FIREFOX_PATH: process.env.FIREFOX_PATH
+        RENDER: process.env.RENDER
       }
     });
 
@@ -61,8 +65,7 @@ async function setupBrowser() {
       platform: process.platform,
       env: {
         NODE_ENV: process.env.NODE_ENV,
-        RENDER: process.env.RENDER,
-        FIREFOX_PATH: process.env.FIREFOX_PATH
+        RENDER: process.env.RENDER
       }
     });
     throw error;
