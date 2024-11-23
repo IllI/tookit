@@ -14,11 +14,11 @@ async function setupBrowser() {
     puppeteerExtra.use(StealthPlugin());
 
     // Check for Chrome binary
-    let browserPath = process.env.CHROME_PATH || '/usr/bin/google-chrome';
+    let browserPath = process.env.CHROME_PATH || '/usr/bin/google-chrome-stable';
     if (process.platform === 'linux') {
       try {
         console.log('Checking for Chrome binary:');
-        const output = execSync('which google-chrome').toString().trim();
+        const output = execSync('which google-chrome-stable').toString().trim();
         if (output) {
           browserPath = output;
           console.log('Found Chrome at:', output);
