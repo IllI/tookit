@@ -13,17 +13,17 @@ async function setupBrowser() {
     const puppeteerExtra = addExtra(puppeteer);
     puppeteerExtra.use(StealthPlugin());
 
-    // Check for Chromium on Linux
+    // Check for Chrome on Linux
     if (process.platform === 'linux') {
       try {
-        console.log('Checking for Chromium binaries:');
-        const whichOutput = execSync('which chromium chromium-browser').toString();
+        console.log('Checking for Chrome binary:');
+        const whichOutput = execSync('which google-chrome').toString();
         console.log('which output:', whichOutput);
         
-        const lsOutput = execSync('ls -la /usr/bin/chromium*').toString();
-        console.log('ls output:', lsOutput);
+        const versionOutput = execSync('google-chrome --version').toString();
+        console.log('version output:', versionOutput);
       } catch (error) {
-        console.error('Error checking Chromium:', error);
+        console.error('Error checking Chrome:', error);
       }
     }
 
@@ -49,31 +49,10 @@ async function setupBrowser() {
       defaultViewport: { width: 1920, height: 1080 }
     };
 
-    // Always set executablePath in production or on Render
+    // Set Chrome path in production or on Render
     if (!isDev || isRender) {
-      // Try multiple possible paths
-      const possiblePaths = [
-        '/usr/bin/chromium',
-        '/usr/bin/chromium-browser',
-        '/usr/bin/google-chrome',
-        process.env.CHROME_PATH
-      ];
-
-      for (const path of possiblePaths) {
-        try {
-          if (path && require('fs').existsSync(path)) {
-            launchOptions.executablePath = path;
-            console.log('Found Chromium at:', path);
-            break;
-          }
-        } catch (e) {
-          console.log(`Path ${path} not found`);
-        }
-      }
-
-      if (!launchOptions.executablePath) {
-        console.error('No valid Chromium installation found');
-      }
+      launchOptions.executablePath = '/usr/bin/google-chrome';
+      console.log('Using Chrome at:', launchOptions.executablePath);
     }
 
     console.log('Launching browser with options:', {
