@@ -1,6 +1,7 @@
 import puppeteer from 'puppeteer';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import { addExtra } from 'puppeteer-extra';
+import { execSync } from 'child_process';
 
 const isDev = process.env.NODE_ENV === 'development';
 const isRender = process.env.RENDER === '1' || process.env.RENDER === 'true';
@@ -11,6 +12,20 @@ async function setupBrowser() {
     // Add stealth plugin to puppeteer
     const puppeteerExtra = addExtra(puppeteer);
     puppeteerExtra.use(StealthPlugin());
+
+    // Check for Chromium on Linux
+    if (process.platform === 'linux') {
+      try {
+        console.log('Checking for Chromium binaries:');
+        const whichOutput = execSync('which chromium chromium-browser').toString();
+        console.log('which output:', whichOutput);
+        
+        const lsOutput = execSync('ls -la /usr/bin/chromium*').toString();
+        console.log('ls output:', lsOutput);
+      } catch (error) {
+        console.error('Error checking Chromium:', error);
+      }
+    }
 
     const launchOptions = {
       headless: "new",
@@ -36,8 +51,29 @@ async function setupBrowser() {
 
     // Always set executablePath in production or on Render
     if (!isDev || isRender) {
-      launchOptions.executablePath = '/usr/bin/chromium-browser';
-      console.log('Using system Chromium at:', launchOptions.executablePath);
+      // Try multiple possible paths
+      const possiblePaths = [
+        '/usr/bin/chromium',
+        '/usr/bin/chromium-browser',
+        '/usr/bin/google-chrome',
+        process.env.CHROME_PATH
+      ];
+
+      for (const path of possiblePaths) {
+        try {
+          if (path && require('fs').existsSync(path)) {
+            launchOptions.executablePath = path;
+            console.log('Found Chromium at:', path);
+            break;
+          }
+        } catch (e) {
+          console.log(`Path ${path} not found`);
+        }
+      }
+
+      if (!launchOptions.executablePath) {
+        console.error('No valid Chromium installation found');
+      }
     }
 
     console.log('Launching browser with options:', {
@@ -48,7 +84,8 @@ async function setupBrowser() {
       platform: process.platform,
       env: {
         NODE_ENV: process.env.NODE_ENV,
-        RENDER: process.env.RENDER
+        RENDER: process.env.RENDER,
+        CHROME_PATH: process.env.CHROME_PATH
       }
     });
 
@@ -70,7 +107,8 @@ async function setupBrowser() {
       platform: process.platform,
       env: {
         NODE_ENV: process.env.NODE_ENV,
-        RENDER: process.env.RENDER
+        RENDER: process.env.RENDER,
+        CHROME_PATH: process.env.CHROME_PATH
       }
     });
     throw error;
