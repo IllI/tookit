@@ -6,7 +6,7 @@ const isDev = process.env.NODE_ENV === 'development';
 const isRender = process.env.RENDER === '1' || process.env.RENDER === 'true';
 const isDebug = process.argv.includes('--debug');
 
-const USER_AGENT = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/95.0.4638.69 Safari/537.36';
+const USER_AGENT = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/101.0.4951.67 Safari/537.36';
 
 async function setupBrowser() {
   try {
@@ -30,7 +30,8 @@ async function setupBrowser() {
         '--disable-sync',
         '--disable-background-timer-throttling',
         '--disable-backgrounding-occluded-windows',
-        '--disable-renderer-backgrounding'
+        '--disable-renderer-backgrounding',
+        '--user-agent=' + USER_AGENT
       ],
       ignoreDefaultArgs: ['--enable-automation'],
       defaultViewport: { width: 1920, height: 1080 }
@@ -80,6 +81,10 @@ async function setupPage(browser) {
   // Set user agent before anything else
   await page.setUserAgent(USER_AGENT);
   
+  // Set longer timeouts
+  await page.setDefaultTimeout(60000);
+  await page.setDefaultNavigationTimeout(60000);
+
   // Enhanced stealth settings
   await page.evaluateOnNewDocument(() => {
     // Overwrite navigator properties
@@ -162,21 +167,13 @@ async function setupPage(browser) {
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
     'Connection': 'keep-alive',
     'Upgrade-Insecure-Requests': '1',
-    'sec-ch-ua': '"Google Chrome";v="95", " Not A;Brand";v="99", "Chromium";v="95"',
+    'sec-ch-ua': '"Google Chrome";v="101", " Not A;Brand";v="99", "Chromium";v="101"',
     'sec-ch-ua-mobile': '?0',
     'sec-ch-ua-platform': '"Linux"'
   });
 
   // Set viewport
   await page.setViewport({ width: 1920, height: 1080 });
-
-  // Add additional page configurations if available
-  if (typeof page.setDefaultTimeout === 'function') {
-    await page.setDefaultTimeout(30000);
-  }
-  if (typeof page.setDefaultNavigationTimeout === 'function') {
-    await page.setDefaultNavigationTimeout(60000);
-  }
 
   return page;
 }
