@@ -170,9 +170,13 @@ async function setupPage(browser) {
   // Set viewport
   await page.setViewport({ width: 1920, height: 1080 });
 
-  // Add additional page configurations
-  await page.setDefaultNavigationTimeout(60000);
-  await page.setDefaultTimeout(30000);
+  // Add additional page configurations if available
+  if (typeof page.setDefaultTimeout === 'function') {
+    await page.setDefaultTimeout(30000);
+  }
+  if (typeof page.setDefaultNavigationTimeout === 'function') {
+    await page.setDefaultNavigationTimeout(60000);
+  }
 
   return page;
 }
