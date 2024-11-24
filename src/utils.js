@@ -36,20 +36,22 @@ async function setupBrowser() {
       defaultViewport: { width: 1920, height: 1080 }
     };
 
-    // Only set executablePath on Render.com
-    if (isRender) {
-      launchOptions.executablePath = process.env.CHROME_PATH || '/opt/render/.cache/puppeteer/chrome/linux-*/chrome-linux/chrome';
+    // Set Chrome path in production or on Render
+    if (!isDev || isRender) {
+      launchOptions.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome';
+      console.log('Using Chrome at:', launchOptions.executablePath);
     }
 
     console.log('Launching browser with options:', {
       isDev,
       isRender,
       isDebug,
-      executablePath: launchOptions.executablePath || 'default',
+      executablePath: launchOptions.executablePath,
       platform: process.platform,
       env: {
         NODE_ENV: process.env.NODE_ENV,
-        RENDER: process.env.RENDER
+        RENDER: process.env.RENDER,
+        PUPPETEER_EXECUTABLE_PATH: process.env.PUPPETEER_EXECUTABLE_PATH
       }
     });
 
@@ -71,7 +73,8 @@ async function setupBrowser() {
       platform: process.platform,
       env: {
         NODE_ENV: process.env.NODE_ENV,
-        RENDER: process.env.RENDER
+        RENDER: process.env.RENDER,
+        PUPPETEER_EXECUTABLE_PATH: process.env.PUPPETEER_EXECUTABLE_PATH
       }
     });
     throw error;
