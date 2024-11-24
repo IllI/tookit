@@ -6,7 +6,7 @@ const isDev = process.env.NODE_ENV === 'development';
 const isRender = process.env.RENDER === '1' || process.env.RENDER === 'true';
 const isDebug = process.argv.includes('--debug');
 
-const USER_AGENT = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/101.0.4951.67 Safari/537.36';
+const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
 async function setupBrowser() {
   try {
@@ -31,10 +31,14 @@ async function setupBrowser() {
         '--disable-background-timer-throttling',
         '--disable-backgrounding-occluded-windows',
         '--disable-renderer-backgrounding',
-        '--user-agent=' + USER_AGENT
+        '--user-agent=' + USER_AGENT,
+        '--enable-javascript',
+        '--disable-notifications',
+        '--lang=en-US,en',
+        '--start-maximized'
       ],
       ignoreDefaultArgs: ['--enable-automation'],
-      defaultViewport: { width: 1920, height: 1080 }
+      defaultViewport: null
     };
 
     console.log('Launching browser with options:', {
@@ -82,8 +86,12 @@ async function setupPage(browser) {
   await page.setUserAgent(USER_AGENT);
   
   // Set longer timeouts
-  await page.setDefaultTimeout(60000);
-  await page.setDefaultNavigationTimeout(60000);
+  await page.setDefaultTimeout(90000);
+  await page.setDefaultNavigationTimeout(90000);
+
+  // Set geolocation permissions
+  const context = page.browserContext();
+  await context.overridePermissions('https://www.stubhub.com', ['geolocation']);
 
   // Enhanced stealth settings
   await page.evaluateOnNewDocument(() => {
@@ -107,7 +115,7 @@ async function setupPage(browser) {
           }
         ]
       },
-      platform: { get: () => 'Linux x86_64' },
+      platform: { get: () => 'Win32' },
       vendor: { get: () => 'Google Inc.' }
     });
 
@@ -158,6 +166,19 @@ async function setupPage(browser) {
         }
       }
     };
+
+    // Add WebGL support
+    const getParameter = WebGLRenderingContext.prototype.getParameter;
+    WebGLRenderingContext.prototype.getParameter = function(parameter) {
+      // Spoof renderer info
+      if (parameter === 37445) {
+        return 'Intel Inc.';
+      }
+      if (parameter === 37446) {
+        return 'Intel Iris OpenGL Engine';
+      }
+      return getParameter.apply(this, [parameter]);
+    };
   });
 
   // Set convincing headers
@@ -167,9 +188,13 @@ async function setupPage(browser) {
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
     'Connection': 'keep-alive',
     'Upgrade-Insecure-Requests': '1',
-    'sec-ch-ua': '"Google Chrome";v="101", " Not A;Brand";v="99", "Chromium";v="101"',
+    'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
     'sec-ch-ua-mobile': '?0',
-    'sec-ch-ua-platform': '"Linux"'
+    'sec-ch-ua-platform': '"Windows"',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'none',
+    'Sec-Fetch-User': '?1'
   });
 
   // Set viewport
