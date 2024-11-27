@@ -175,6 +175,7 @@ export class SearchService {
 
       if (existingEvents && existingEvents.length > 0) {
         eventRecord = existingEvents[0];
+        console.log(`[INFO] Found existing event with ID: ${eventRecord.id}`);
       } else {
         // Insert new event
         const { data, error } = await this.supabase
@@ -191,6 +192,7 @@ export class SearchService {
 
         if (error) throw error;
         eventRecord = data;
+        console.log(`[INFO] Created new event with ID: ${eventRecord.id}`);
       }
 
       // Store event link
@@ -209,7 +211,22 @@ export class SearchService {
         }
       }
 
-      // Store tickets if available
+      // Delete existing tickets for this event from this source before adding new ones
+      if (eventRecord.id) {
+        console.log(`[INFO] Removing existing tickets for event ${eventRecord.id} from source ${eventData.source}`);
+        const { error: deleteError } = await this.supabase
+          .from('tickets')
+          .delete()
+          .eq('event_id', eventRecord.id)
+          .eq('source', eventData.source);
+
+        if (deleteError) {
+          console.error('[ERROR] Failed to delete existing tickets:', deleteError);
+          throw deleteError;
+        }
+      }
+
+      // Store new tickets if available
       if (Array.isArray(eventData.tickets) && eventData.tickets.length > 0) {
         const tickets = eventData.tickets.flatMap((section: Section) => {
           if (!Array.isArray(section.tickets)) return [];
@@ -230,6 +247,7 @@ export class SearchService {
         });
 
         if (tickets.length > 0) {
+          console.log(`[INFO] Inserting ${tickets.length} new tickets for event ${eventRecord.id}`);
           const { error: ticketError } = await this.supabase
             .from('tickets')
             .insert(tickets);
