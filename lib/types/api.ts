@@ -1,63 +1,46 @@
-export type SearchParams = {
-  keyword?: string;
-  artist?: string;
-  venue?: string;
+export interface SearchParams {
+  keyword: string;
   location?: string;
-  date?: string;
-  source?: 'stubhub' | 'vividseats' | 'all';
-};
+  source?: 'all' | 'stubhub' | 'vividseats';
+}
 
-export type Event = {
-  id: string;
+export interface TicketSource {
+  isLive: boolean;
+  lastUpdated?: string;
+  error?: string;
+}
+
+export interface SearchResult {
+  success: boolean;
+  data?: any[];
+  error?: string;
+  metadata: {
+    stubhub?: TicketSource;
+    vividseats?: TicketSource;
+    error?: string;
+  };
+}
+
+export interface Section {
+  section: string;
+  tickets: Ticket[];
+  category: string;
+}
+
+export interface Ticket {
+  quantity: string;
+  price: string;
+  rawPrice: number;
+  listingId: string;
+  listingUrl: string;
+}
+
+export interface Event {
+  id?: number;
   name: string;
   date: string;
   venue: string;
-  type?: string;
-  category?: string;
-  source?: string;
-  links?: EventLink[];
-  tickets?: Ticket[];
-};
-
-export type EventLink = {
-  id: string;
-  eventId: string;
-  source: string;
-  url: string;
-};
-
-export type Ticket = {
-  id: string;
-  eventId: string;
-  price: number;
-  section: string;
-  row?: string;
-  quantity: number;
-  source: string;
-  url: string;
-  listingUrl?: string;
-  listingId?: string;
-  rawPrice: number;
-  dealScore?: string;
-  rawData?: any;
-};
-
-export type TicketSource = {
-  lastUpdated: string;
-  isLive: boolean;
-  error?: string;
-};
-
-export type SearchResult = {
-  success: boolean;
-  data?: Event[];
-  error?: string;
-  metadata: {
-    total?: number;
-    sources?: {
-      stubhub?: TicketSource;
-      vividseats?: TicketSource;
-    };
-    error?: string;
-  };
-}; 
+  location: string;
+  category: string;
+  tickets?: Section[];
+} 

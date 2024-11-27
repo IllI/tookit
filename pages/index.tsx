@@ -1,79 +1,78 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import SearchForm from '@/components/search/SearchForm';
 import TicketResults from '@/components/search/TicketResults';
-import { SearchParams, SearchResult } from '@/lib/types/api';
-import { logger } from '@/lib/utils/logger';
+import type { SearchParams, SearchResult } from '@/lib/types/api';
 
 export default function Home() {
   const [searchResults, setSearchResults] = useState<SearchResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [lastSearchParams, setLastSearchParams] = useState<SearchParams | null>(null);
+  const [lastUpdated, setLastUpdated] = useState(new Date());
 
-  // Function to perform search
   const handleSearch = async (params: SearchParams) => {
     setLoading(true);
     setError(null);
-    setLastSearchParams(params);
 
     try {
       const response = await fetch('/api/events/search', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(params)
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(params),
       });
 
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
       const data = await response.json();
-      if (!response.ok) throw new Error(data.error || 'Search failed');
-      
       setSearchResults(data);
-      logger.info('Search completed', data);
+      setLastUpdated(new Date());
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An error occurred');
-      logger.error('Search error', err);
+      console.error('Search error:', err);
     } finally {
       setLoading(false);
     }
   };
 
-  // Auto-refresh results every 2 minutes if we have active search
-  useEffect(() => {
-    if (!lastSearchParams) return;
-
-    const intervalId = setInterval(() => {
-      logger.info('Auto-refreshing results');
-      handleSearch(lastSearchParams);
-    }, 120000); // 2 minutes
-
-    return () => clearInterval(intervalId);
-  }, [lastSearchParams]);
-
   return (
-    <div className="container mx-auto p-4">
-      <h1 className="text-3xl font-bold mb-8">Ticket Search</h1>
-      
-      <SearchForm onSearch={handleSearch} />
-      
-      {loading && (
-        <div className="my-4 text-center">
-          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900 mx-auto"></div>
-          <p className="mt-2">Searching tickets...</p>
+    <div className="min-h-screen bg-gray-50">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <div className="max-w-3xl mx-auto">
+          <h1 className="text-3xl font-bold text-gray-900 text-center mb-8">
+            Ticket Search
+          </h1>
+
+          <div className="bg-white rounded-lg shadow p-6 mb-8">
+            <SearchForm onSearch={handleSearch} />
+          </div>
+
+          {loading && (
+            <div className="flex justify-center items-center py-8">
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+              <p className="ml-2 text-gray-600">Searching tickets...</p>
+            </div>
+          )}
+
+          {error && (
+            <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-8">
+              <p className="text-red-700">{error}</p>
+            </div>
+          )}
+
+          {searchResults && (
+            <div className="bg-white rounded-lg shadow">
+              <TicketResults 
+                results={searchResults} 
+                isLoading={loading}
+                lastUpdated={lastUpdated}
+              />
+            </div>
+          )}
         </div>
-      )}
-      
-      {error && (
-        <div className="my-4 p-4 bg-red-100 text-red-700 rounded">
-          {error}
-        </div>
-      )}
-      
-      {searchResults && (
-        <TicketResults 
-          results={searchResults} 
-          isLoading={loading}
-          lastUpdated={new Date()}
-        />
-      )}
+      </div>
     </div>
   );
 }

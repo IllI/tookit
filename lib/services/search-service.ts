@@ -1,132 +1,56 @@
-import StubHubSearcher from '../../src/stub-hub';
-import VividSeatsSearcher from '../../src/vivid-seats';
 import { createClient } from '@supabase/supabase-js';
-import { config } from '../../src/config/env';
-import type { SearchParams, SearchResult, Event, Ticket, TicketSource } from '../types/api';
-import { findMatchingEvent } from '../../src/event-utils';
-import { logger } from '../utils/logger';
-import { parse } from 'date-fns';
+import { config } from '@/src/config/env';
+import StubHubSearcher from '@/src/stub-hub';
+import VividSeatsSearcher from '@/src/vivid-seats';
+import { parse, format } from 'date-fns';
+import type { Event, SearchParams, SearchResult, TicketSource, Section, Ticket } from '../types/api';
 
 export class SearchService {
   private supabase;
-  private stubHubSearcher: StubHubSearcher;
-  private vividSeatsSearcher: VividSeatsSearcher;
+  private searchTimeout = 120000; // 2 minute timeout
 
   constructor() {
-    this.supabase = createClient(
-      config.supabase.url,
-      config.supabase.serviceKey
-    );
-    this.stubHubSearcher = new StubHubSearcher();
-    this.vividSeatsSearcher = new VividSeatsSearcher();
+    this.supabase = createClient(config.supabase.url, config.supabase.serviceKey);
   }
 
   async searchAll(params: SearchParams): Promise<SearchResult> {
+    console.log('[INFO] Starting search with params:', params);
+    
     try {
-      // Add a timestamp to track when the search started
-      const searchStartTime = new Date();
-
-      // Get existing events and tickets from database first
-      const { data: existingEvents } = await this.supabase
-        .from('events')
-        .select(`
-          *,
-          event_links (*),
-          tickets (*)
-        `)
-        .ilike('name', `%${params.keyword || params.artist}%`)
-        .gte('date', new Date().toISOString());
-
-      logger.info('Found existing events:', existingEvents?.length || 0);
-
-      // Start searches in parallel with timeouts
-      const searches = [];
-      const sources: Record<string, TicketSource> = {};
-
-      if (params.source === 'all' || params.source === 'stubhub') {
-        searches.push(
-          this.searchStubHub(params)
-            .then(results => {
-              sources.stubhub = { 
-                isLive: true, 
-                lastUpdated: searchStartTime.toISOString() 
-              };
-              return results;
-            })
-            .catch(error => {
-              logger.error('StubHub search error:', error);
-              sources.stubhub = {
-                isLive: false,
-                lastUpdated: existingEvents?.find(e => 
-                  e.event_links.some(l => l.source === 'stubhub')
-                )?.updated_at || searchStartTime.toISOString(),
-                error: error.message
-              };
-              return [];
-            })
-        );
-      }
-
-      if (params.source === 'all' || params.source === 'vividseats') {
-        searches.push(
-          this.searchVividSeats(params)
-            .then(results => {
-              sources.vividseats = { 
-                isLive: true, 
-                lastUpdated: searchStartTime.toISOString() 
-              };
-              return results;
-            })
-            .catch(error => {
-              logger.error('VividSeats search error:', error);
-              sources.vividseats = {
-                isLive: false,
-                lastUpdated: existingEvents?.find(e => 
-                  e.event_links.some(l => l.source === 'vividseats')
-                )?.updated_at || searchStartTime.toISOString(),
-                error: error.message
-              };
-              return [];
-            })
-        );
-      }
-
-      // Wait for all searches with a timeout
-      const results = await Promise.race([
-        Promise.all(searches),
-        new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Search timeout')), 60000)
-        )
+      // Run searches independently to prevent one failure from affecting the other
+      const results = await Promise.allSettled([
+        this.searchVividSeats(params),
+        this.searchStubHub(params)
       ]);
 
-      // Combine and deduplicate results
-      const allEvents = [...(existingEvents || []), ...results.flat()];
-      const eventMap = new Map<string, Event>();
-      
-      allEvents.forEach(event => {
-        const key = `${event.name}-${event.date}-${event.venue}`;
-        if (!eventMap.has(key) || event.tickets?.length > (eventMap.get(key)?.tickets?.length || 0)) {
-          eventMap.set(key, event);
+      // Log results of each search
+      results.forEach((result, index) => {
+        const source = index === 0 ? 'VividSeats' : 'StubHub';
+        if (result.status === 'rejected') {
+          console.error(`[ERROR] ${source} search failed:`, result.reason);
         }
       });
 
-      const combinedResults = Array.from(eventMap.values());
-
-      logger.info('Search completed', {
-        totalResults: combinedResults.length,
-        sources: Object.keys(sources)
-      });
+      // Get all events regardless of search success
+      const events = await this.getEventsWithTickets(params);
 
       return {
         success: true,
-        data: combinedResults,
+        data: events,
         metadata: {
-          total: combinedResults.length,
-          sources
+          stubhub: { 
+            isLive: results[1].status === 'fulfilled',
+            error: results[1].status === 'rejected' ? results[1].reason?.message : undefined
+          },
+          vividseats: {
+            isLive: results[0].status === 'fulfilled',
+            error: results[0].status === 'rejected' ? results[0].reason?.message : undefined
+          }
         }
       };
+
     } catch (error) {
-      logger.error('Search error:', error);
+      console.error('[ERROR] Search error:', error);
       return {
         success: false,
         error: 'Failed to perform search',
@@ -137,499 +61,222 @@ export class SearchService {
     }
   }
 
-  private async storeEvent(event: any): Promise<Event | null> {
+  private async searchVividSeats(params: SearchParams) {
     try {
-      // Check for existing event
-      const matchingEvent = await findMatchingEvent(
-        this.supabase,
-        {
-          name: event.name || event.title,
-          date: event.date,
-          venue: event.venue
-        },
-        event.source
-      );
+      const searcher = new VividSeatsSearcher();
+      const events = await searcher.searchConcerts(params.keyword, '', params.location);
+      
+      for (const event of events) {
+        try {
+          // Map VividSeats data structure to our expected format
+          const normalizedEvent = {
+            name: event.title,
+            date: event.date,
+            venue: event.venue,
+            location: event.location,
+            category: 'Concert',
+            link: event.link,
+            source: event.source,
+            tickets: event.tickets?.sections
+          };
 
-      if (matchingEvent) {
-        logger.info(`Found matching event: ${matchingEvent.name}`);
-        
-        // Add source-specific link if it doesn't exist
-        if (!matchingEvent.hasSourceLink) {
-          const { error: linkError } = await this.supabase
-            .from('event_links')
-            .insert({
-              event_id: matchingEvent.id,
-              source: event.source,
-              url: event.link
-            });
-
-          if (linkError) {
-            logger.error('Error inserting event link:', linkError);
+          // Validate required fields
+          if (!normalizedEvent.name || !normalizedEvent.date || !normalizedEvent.venue) {
+            console.error('[ERROR] Missing required event data:', normalizedEvent);
+            continue;
           }
-        }
 
-        // Insert new tickets
-        if (event.tickets?.sections) {
-          const tickets = this.transformTickets(matchingEvent.id, event);
+          await this.upsertEvent(normalizedEvent);
+          console.log(`[INFO] Stored VividSeats event: ${normalizedEvent.name}`);
+        } catch (eventError) {
+          console.error(`[ERROR] Failed to store VividSeats event:`, eventError);
+        }
+      }
+
+      console.log(`[INFO] Successfully processed ${events.length} VividSeats events`);
+    } catch (error) {
+      console.error('[ERROR] VividSeats search failed:', error);
+    }
+  }
+
+  private async searchStubHub(params: SearchParams) {
+    try {
+      const searcher = new StubHubSearcher();
+      const events = await searcher.searchConcerts(params.keyword, '', params.location);
+      
+      // Store each event with its tickets
+      for (const event of events) {
+        try {
+          // Log the event data including tickets for debugging
+          console.log('[DEBUG] StubHub event data:', {
+            name: event.name,
+            tickets: event.tickets?.length || 0,
+            sections: event.tickets?.map(s => ({
+              section: s.section,
+              ticketCount: s.tickets?.length
+            }))
+          });
+
+          await this.upsertEvent({
+            name: event.name,
+            date: event.date,
+            venue: event.venue,
+            location: event.location,
+            category: event.category,
+            link: event.link,
+            source: event.source,
+            tickets: event.tickets // Make sure tickets are passed through
+          });
+          
+          console.log(`[INFO] Stored StubHub event: ${event.name} with ${event.tickets?.length || 0} sections`);
+        } catch (eventError) {
+          console.error(`[ERROR] Failed to store StubHub event ${event.name}:`, eventError);
+        }
+      }
+
+      console.log(`[INFO] Successfully processed ${events.length} StubHub events`);
+    } catch (error) {
+      console.error('[ERROR] StubHub search failed:', error);
+    }
+  }
+
+  private async upsertEvent(eventData: {
+    name: string;
+    date: string;
+    venue: string;
+    location: string;
+    category: string;
+    link?: string;
+    source: string;
+    tickets?: Section[];
+  }) {
+    try {
+      let parsedDate: Date;
+      console.log('[DEBUG] Parsing date:', eventData.date);
+
+      if (eventData.source === 'vividseats') {
+        const [month, day, _, time] = eventData.date.split(' ');
+        const year = '2025';
+        const dateStr = `${month} ${day} ${year} ${time}`;
+        parsedDate = parse(dateStr, 'MMM d yyyy h:mma', new Date());
+      } else {
+        parsedDate = parse(eventData.date, 'MMM d yyyy h:mm a', new Date());
+      }
+
+      // First, check if event exists
+      const { data: existingEvents } = await this.supabase
+        .from('events')
+        .select('id')
+        .eq('name', eventData.name)
+        .eq('date', format(parsedDate, "yyyy-MM-dd'T'HH:mm:ssX"))
+        .eq('venue', eventData.venue);
+
+      let eventRecord;
+
+      if (existingEvents && existingEvents.length > 0) {
+        eventRecord = existingEvents[0];
+      } else {
+        // Insert new event
+        const { data, error } = await this.supabase
+          .from('events')
+          .insert([{
+            name: eventData.name,
+            type: 'concert',
+            category: eventData.category || 'Concert',
+            date: format(parsedDate, "yyyy-MM-dd'T'HH:mm:ssX"),
+            venue: eventData.venue
+          }])
+          .select()
+          .single();
+
+        if (error) throw error;
+        eventRecord = data;
+      }
+
+      // Store event link
+      if (eventData.link) {
+        const { error: linkError } = await this.supabase
+          .from('event_links')
+          .insert([{
+            event_id: eventRecord.id,
+            source: eventData.source,
+            url: eventData.link
+          }])
+          .select();
+
+        if (linkError && linkError.code !== '23505') { // Ignore unique violation
+          throw linkError;
+        }
+      }
+
+      // Store tickets if available
+      if (Array.isArray(eventData.tickets) && eventData.tickets.length > 0) {
+        const tickets = eventData.tickets.flatMap((section: Section) => {
+          if (!Array.isArray(section.tickets)) return [];
+          
+          return section.tickets.map((ticket: Ticket) => ({
+            event_id: eventRecord.id,
+            section: section.section,
+            price: ticket.rawPrice,
+            quantity: parseInt(ticket.quantity) || 1,
+            source: eventData.source,
+            type: section.category || 'standard',
+            raw_data: {
+              listingId: ticket.listingId,
+              originalPrice: ticket.price,
+              url: ticket.listingUrl
+            }
+          }));
+        });
+
+        if (tickets.length > 0) {
           const { error: ticketError } = await this.supabase
             .from('tickets')
             .insert(tickets);
 
           if (ticketError) {
-            logger.error('Error inserting tickets:', ticketError);
+            console.error('[ERROR] Failed to insert tickets:', ticketError);
+            throw ticketError;
           }
         }
-
-        // Return updated event data
-        const { data: updatedEvent } = await this.supabase
-          .from('events')
-          .select(`
-            *,
-            event_links (*),
-            tickets (*)
-          `)
-          .eq('id', matchingEvent.id)
-          .single();
-
-        return updatedEvent;
       }
 
-      // Insert new event
-      const { data: newEvent, error: eventError } = await this.supabase
-        .from('events')
-        .insert({
-          name: event.name || event.title,
-          type: event.type || 'Concert',
-          category: event.category || 'Concert',
-          date: new Date(event.date).toISOString(),
-          venue: event.venue
-        })
-        .select()
-        .single();
+      console.log(`[INFO] Successfully stored event: ${eventData.name}`);
+      return eventRecord;
 
-      if (eventError || !newEvent) {
-        logger.error('Error inserting event:', eventError);
-        return null;
-      }
+    } catch (error) {
+      console.error('[ERROR] Failed to store event:', error);
+      throw error;
+    }
+  }
 
-      // Insert event link
-      await this.supabase
-        .from('event_links')
-        .insert({
-          event_id: newEvent.id,
-          source: event.source,
-          url: event.link
-        });
-
-      // Insert tickets
-      if (event.tickets?.sections) {
-        const tickets = this.transformTickets(newEvent.id, event);
-        await this.supabase
-          .from('tickets')
-          .insert(tickets);
-      }
-
-      // Return complete event data
-      const { data: completeEvent } = await this.supabase
+  private async getEventsWithTickets(params: SearchParams) {
+    try {
+      const { data: events, error } = await this.supabase
         .from('events')
         .select(`
           *,
-          event_links (*),
-          tickets (*)
+          event_links (
+            source,
+            url
+          ),
+          tickets (
+            id,
+            section,
+            price,
+            quantity,
+            source,
+            type,
+            raw_data
+          )
         `)
-        .eq('id', newEvent.id)
-        .single();
+        .order('date', { ascending: true });
 
-      return completeEvent;
+      if (error) throw error;
+      return events || [];
     } catch (error) {
-      logger.error('Error storing event:', error);
-      return null;
-    }
-  }
-
-  private transformTickets(eventId: string, event: any): any[] {
-    return event.tickets.sections.flatMap((section: any) =>
-      section.tickets.map((ticket: any) => ({
-        event_id: eventId,
-        price: ticket.rawPrice,
-        section: section.section,
-        row: ticket.row,
-        quantity: parseInt(ticket.quantity) || 1,
-        source: event.source,
-        url: ticket.listingUrl || ticket.url,
-        listing_id: ticket.listingId,
-        raw_data: ticket
-      }))
-    );
-  }
-
-  private async searchStubHub(params: SearchParams): Promise<Event[]> {
-    try {
-      const rawEvents = await this.stubHubSearcher.searchConcerts(
-        params.artist || params.keyword || '',
-        params.venue || '',
-        params.location || ''
-      );
-
-      logger.info(`Found ${rawEvents.length} StubHub events`);
-
-      // Process each event sequentially to avoid race conditions
-      const storedEvents = [];
-      for (const event of rawEvents) {
-        try {
-          // Parse the date string properly
-          const dateRegex = /([A-Za-z]+)\s+(\d+)\s+(\d{4}).*?(\d+:\d+\s*[AP]M)/i;
-          const match = event.date.match(dateRegex);
-          
-          if (!match) {
-            logger.error('Failed to parse StubHub date:', event.date);
-            continue;
-          }
-
-          const [_, month, day, year, time] = match;
-          const standardDateStr = `${month} ${day} ${year} ${time}`;
-          const parsedDate = parse(standardDateStr, 'MMM d yyyy h:mm a', new Date());
-
-          if (isNaN(parsedDate.getTime())) {
-            logger.error('Invalid date after parsing:', standardDateStr);
-            continue;
-          }
-
-          // Check for existing event
-          const matchingEvent = await findMatchingEvent(
-            this.supabase,
-            {
-              name: event.name,
-              date: parsedDate.toISOString(),
-              venue: event.venue
-            },
-            'stubhub'
-          );
-
-          if (matchingEvent) {
-            logger.info(`Found matching event for StubHub: ${matchingEvent.name}`);
-            
-            // Add StubHub link if it doesn't exist
-            if (!matchingEvent.hasSourceLink) {
-              const { error: linkError } = await this.supabase
-                .from('event_links')
-                .insert({
-                  event_id: matchingEvent.id,
-                  source: 'stubhub',
-                  url: event.link
-                });
-
-              if (linkError) {
-                logger.error('Error inserting StubHub link:', linkError);
-              } else {
-                logger.info('Added StubHub link to existing event');
-              }
-            }
-
-            // Insert or update tickets
-            if (event.tickets?.sections) {
-              const tickets = this.transformTickets(matchingEvent.id, {
-                ...event,
-                source: 'stubhub'
-              });
-
-              if (tickets.length > 0) {
-                const { error: ticketError } = await this.supabase
-                  .from('tickets')
-                  .insert(tickets);
-
-                if (ticketError) {
-                  logger.error('Error inserting StubHub tickets:', ticketError);
-                } else {
-                  logger.info(`Inserted ${tickets.length} StubHub tickets`);
-                }
-              }
-            }
-
-            // Get updated event data
-            const { data: updatedEvent } = await this.supabase
-              .from('events')
-              .select(`
-                *,
-                event_links (*),
-                tickets (*)
-              `)
-              .eq('id', matchingEvent.id)
-              .single();
-
-            if (updatedEvent) {
-              storedEvents.push(updatedEvent);
-            }
-          } else {
-            // Insert new event
-            const { data: newEvent, error: eventError } = await this.supabase
-              .from('events')
-              .insert({
-                name: event.name,
-                type: 'Concert',
-                category: event.category || 'Concert',
-                date: parsedDate.toISOString(),
-                venue: event.venue
-              })
-              .select()
-              .single();
-
-            if (eventError) {
-              logger.error('Error inserting new StubHub event:', eventError);
-              continue;
-            }
-
-            logger.info(`Created new event: ${newEvent.name}`);
-
-            // Insert StubHub link
-            const { error: linkError } = await this.supabase
-              .from('event_links')
-              .insert({
-                event_id: newEvent.id,
-                source: 'stubhub',
-                url: event.link
-              });
-
-            if (linkError) {
-              logger.error('Error inserting new StubHub link:', linkError);
-            }
-
-            // Insert tickets
-            if (event.tickets?.sections) {
-              const tickets = this.transformTickets(newEvent.id, {
-                ...event,
-                source: 'stubhub'
-              });
-
-              if (tickets.length > 0) {
-                const { error: ticketError } = await this.supabase
-                  .from('tickets')
-                  .insert(tickets);
-
-                if (ticketError) {
-                  logger.error('Error inserting new StubHub tickets:', ticketError);
-                } else {
-                  logger.info(`Inserted ${tickets.length} new StubHub tickets`);
-                }
-              }
-            }
-
-            // Get complete event data
-            const { data: completeEvent } = await this.supabase
-              .from('events')
-              .select(`
-                *,
-                event_links (*),
-                tickets (*)
-              `)
-              .eq('id', newEvent.id)
-              .single();
-
-            if (completeEvent) {
-              storedEvents.push(completeEvent);
-            }
-          }
-        } catch (error) {
-          logger.error('Error processing StubHub event:', error);
-        }
-      }
-
-      logger.info(`Successfully stored ${storedEvents.length} StubHub events`);
-      return storedEvents;
-    } catch (error) {
-      logger.error('StubHub search error:', error);
+      console.error('[ERROR] Failed to get events with tickets:', error);
       return [];
     }
   }
-
-  private async searchVividSeats(params: SearchParams): Promise<Event[]> {
-    let browser = null;
-    try {
-      const rawEvents = await this.vividSeatsSearcher.searchConcerts(
-        params.artist || params.keyword || '',
-        params.venue || '',
-        params.location || ''
-      );
-
-      logger.info(`Found ${rawEvents.length} VividSeats events`);
-
-      // Process each event sequentially to avoid race conditions
-      const storedEvents = [];
-      for (const event of rawEvents) {
-        try {
-          // Parse VividSeats date format
-          const dateRegex = /([A-Za-z]+)\s+(\d+)\s+[A-Za-z]+\s+(\d+:\d+[ap]m)/i;
-          const match = event.date.match(dateRegex);
-          
-          if (!match) {
-            logger.error('Failed to parse VividSeats date:', event.date);
-            continue;
-          }
-
-          const [_, month, day, time] = match;
-          const year = '2025'; // Default to 2025 for future dates
-          const standardDateStr = `${month} ${day} ${year} ${time}`;
-          const parsedDate = parse(standardDateStr, 'MMM d yyyy h:mma', new Date());
-
-          if (isNaN(parsedDate.getTime())) {
-            logger.error('Invalid date after parsing:', standardDateStr);
-            continue;
-          }
-
-          // Check for existing event
-          const matchingEvent = await findMatchingEvent(
-            this.supabase,
-            {
-              name: event.title,
-              date: parsedDate.toISOString(),
-              venue: event.venue
-            },
-            'vividseats'
-          );
-
-          if (matchingEvent) {
-            logger.info(`Found matching event for VividSeats: ${matchingEvent.name}`);
-            
-            // Add VividSeats link if it doesn't exist
-            if (!matchingEvent.hasSourceLink) {
-              const { error: linkError } = await this.supabase
-                .from('event_links')
-                .insert({
-                  event_id: matchingEvent.id,
-                  source: 'vividseats',
-                  url: event.link
-                });
-
-              if (linkError) {
-                logger.error('Error inserting VividSeats link:', linkError);
-              } else {
-                logger.info('Added VividSeats link to existing event');
-              }
-            }
-
-            // Insert or update tickets
-            if (event.tickets?.sections) {
-              const tickets = this.transformTickets(matchingEvent.id, {
-                ...event,
-                source: 'vividseats'
-              });
-
-              if (tickets.length > 0) {
-                const { error: ticketError } = await this.supabase
-                  .from('tickets')
-                  .insert(tickets);
-
-                if (ticketError) {
-                  logger.error('Error inserting VividSeats tickets:', ticketError);
-                } else {
-                  logger.info(`Inserted ${tickets.length} VividSeats tickets`);
-                }
-              }
-            }
-
-            // Get updated event data
-            const { data: updatedEvent } = await this.supabase
-              .from('events')
-              .select(`
-                *,
-                event_links (*),
-                tickets (*)
-              `)
-              .eq('id', matchingEvent.id)
-              .single();
-
-            if (updatedEvent) {
-              storedEvents.push(updatedEvent);
-            }
-          } else {
-            // Insert new event
-            const { data: newEvent, error: eventError } = await this.supabase
-              .from('events')
-              .insert({
-                name: event.title,
-                type: 'Concert',
-                category: 'Concert',
-                date: parsedDate.toISOString(),
-                venue: event.venue
-              })
-              .select()
-              .single();
-
-            if (eventError) {
-              logger.error('Error inserting new VividSeats event:', eventError);
-              continue;
-            }
-
-            logger.info(`Created new event: ${newEvent.name}`);
-
-            // Insert VividSeats link
-            const { error: linkError } = await this.supabase
-              .from('event_links')
-              .insert({
-                event_id: newEvent.id,
-                source: 'vividseats',
-                url: event.link
-              });
-
-            if (linkError) {
-              logger.error('Error inserting new VividSeats link:', linkError);
-            }
-
-            // Insert tickets
-            if (event.tickets?.sections) {
-              const tickets = this.transformTickets(newEvent.id, {
-                ...event,
-                source: 'vividseats'
-              });
-
-              if (tickets.length > 0) {
-                const { error: ticketError } = await this.supabase
-                  .from('tickets')
-                  .insert(tickets);
-
-                if (ticketError) {
-                  logger.error('Error inserting new VividSeats tickets:', ticketError);
-                } else {
-                  logger.info(`Inserted ${tickets.length} new VividSeats tickets`);
-                }
-              }
-            }
-
-            // Get complete event data
-            const { data: completeEvent } = await this.supabase
-              .from('events')
-              .select(`
-                *,
-                event_links (*),
-                tickets (*)
-              `)
-              .eq('id', newEvent.id)
-              .single();
-
-            if (completeEvent) {
-              storedEvents.push(completeEvent);
-            }
-          }
-        } catch (error) {
-          logger.error('Error processing VividSeats event:', error);
-        }
-      }
-
-      logger.info(`Successfully stored ${storedEvents.length} VividSeats events`);
-      return storedEvents;
-    } catch (error) {
-      logger.error('VividSeats search error:', error);
-      return [];
-    } finally {
-      if (browser) {
-        try {
-          await browser.close();
-        } catch (error) {
-          logger.error('Error closing browser:', error);
-        }
-      }
-    }
-  }
-}
-
-export const searchService = new SearchService(); 
+} 

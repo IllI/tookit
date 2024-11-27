@@ -1,7 +1,6 @@
-import { NextApiRequest, NextApiResponse } from 'next';
-import { searchService } from '@/lib/services/search-service';
-import type { SearchParams, SearchResult } from '@/lib/types/api';
-import { logger } from '@/lib/utils/logger';
+import type { NextApiRequest, NextApiResponse } from 'next';
+import { SearchService } from '@/lib/services/search-service';
+import type { SearchResult } from '@/lib/types/api';
 
 export default async function handler(
   req: NextApiRequest,
@@ -16,27 +15,16 @@ export default async function handler(
   }
 
   try {
-    const params = req.body as SearchParams;
-    logger.info('Search request received', params);
-
-    const result = await searchService.searchAll({
-      ...params,
-      source: 'all'
-    });
-
-    if (!result.success) {
-      logger.error('Search failed:', result.error);
-      return res.status(500).json(result);
-    }
-
+    const searchService = new SearchService();
+    const result = await searchService.searchAll(req.body);
     return res.status(200).json(result);
   } catch (error) {
-    logger.error('API error:', error);
+    console.error('[ERROR] API error:', error);
     return res.status(500).json({
       success: false,
-      error: error instanceof Error ? error.message : 'Internal server error',
+      error: 'Internal server error',
       metadata: {
-        error: error instanceof Error ? error.stack : 'Unknown error'
+        error: error instanceof Error ? error.message : 'Unknown error'
       }
     });
   }

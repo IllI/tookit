@@ -18,20 +18,22 @@ export function getBaseArtistName(name) {
 export function getNameSimilarity(name1, name2) {
   if (!name1 || !name2) return 0;
   
-  const norm1 = normalizeString(name1);
-  const norm2 = normalizeString(name2);
+  const norm1 = normalizeString(getBaseArtistName(name1));
+  const norm2 = normalizeString(getBaseArtistName(name2));
   
   // Direct match
   if (norm1 === norm2) return 1;
   
   // One contains the other
-  if (norm1.includes(norm2) || norm2.includes(norm1)) return 0.8;
+  if (norm1.includes(norm2) || norm2.includes(norm1)) return 0.9;
   
   // Calculate character overlap
   const chars1 = new Set(norm1);
   const chars2 = new Set(norm2);
   const intersection = new Set([...chars1].filter(x => chars2.has(x)));
-  return intersection.size / Math.max(chars1.size, chars2.size);
+  const similarity = intersection.size / Math.max(chars1.size, chars2.size);
+  
+  return similarity;
 }
 
 // Function to parse date from different formats
@@ -66,7 +68,7 @@ function parseEventDate(dateStr) {
   }
 }
 
-// Function to find matching event
+// Function to find matching event with improved matching logic
 export async function findMatchingEvent(supabaseClient, eventDetails, source) {
   console.log('Searching for matching event:', {
     name: eventDetails.name || eventDetails.title,
@@ -76,8 +78,8 @@ export async function findMatchingEvent(supabaseClient, eventDetails, source) {
   });
 
   try {
-    // First, try to find exact matches
-    const { data: exactMatches, error: exactError } = await supabaseClient
+    // Get all events within a reasonable date range
+    const { data: potentialMatches, error: exactError } = await supabaseClient
       .from('events')
       .select(`
         id,
@@ -89,11 +91,10 @@ export async function findMatchingEvent(supabaseClient, eventDetails, source) {
           source
         )
       `)
-      .ilike('name', getBaseArtistName(eventDetails.name || eventDetails.title))
       .gte('date', new Date().toISOString());
 
     if (exactError) {
-      console.error('Error searching for exact matches:', exactError);
+      console.error('Error searching for matches:', exactError);
       return null;
     }
 
@@ -106,29 +107,15 @@ export async function findMatchingEvent(supabaseClient, eventDetails, source) {
 
     console.log('Parsed new event date:', newEventDate);
 
-    // First, try to find an exact match (same artist, same day, similar venue)
-    const exactMatch = exactMatches?.find(existingEvent => {
-      const existingDate = new Date(existingEvent.date);
-      return isSameDay(existingDate, newEventDate) &&
-             getNameSimilarity(existingEvent.venue, eventDetails.venue) > 0.6;
-    });
-
-    if (exactMatch) {
-      console.log('Found exact match:', exactMatch.name);
-      return {
-        ...exactMatch,
-        hasSourceLink: exactMatch.event_links.some(link => link.source === source)
-      };
-    }
-
-    // If no exact match, look for similar events
-    const matches = exactMatches
+    // Score each potential match
+    const scoredMatches = potentialMatches
       .map(existingEvent => {
         const existingDate = new Date(existingEvent.date);
         
+        // Calculate various similarity scores
         const nameSimilarity = getNameSimilarity(
-          getBaseArtistName(existingEvent.name),
-          getBaseArtistName(eventDetails.name || eventDetails.title)
+          existingEvent.name,
+          eventDetails.name || eventDetails.title
         );
         
         const venueSimilarity = getNameSimilarity(
@@ -139,7 +126,7 @@ export async function findMatchingEvent(supabaseClient, eventDetails, source) {
         const dateMatch = isSameDay(existingDate, newEventDate);
         const dateDiffInDays = Math.abs(existingDate.getTime() - newEventDate.getTime()) / (1000 * 60 * 60 * 24);
 
-        // Scoring system:
+        // Weighted scoring system:
         // - Name similarity: 0-40 points
         // - Venue similarity: 0-30 points
         // - Date match: 30 points
@@ -164,11 +151,11 @@ export async function findMatchingEvent(supabaseClient, eventDetails, source) {
           hasSourceLink: existingEvent.event_links.some(link => link.source === source)
         };
       })
-      .filter(match => match.score > 0.8) // Require a very high match score
+      .filter(match => match.score > 0.7) // Require a higher match score
       .sort((a, b) => b.score - a.score);
 
-    if (matches.length > 0) {
-      const bestMatch = matches[0];
+    if (scoredMatches.length > 0) {
+      const bestMatch = scoredMatches[0];
       console.log(`Found matching event: "${bestMatch.event.name}" (score: ${bestMatch.score.toFixed(2)})`);
       
       // Choose the better name
