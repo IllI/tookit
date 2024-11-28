@@ -1,5 +1,5 @@
-import { createClient } from '@supabase/supabase-js';
 import { config } from '@/src/config/env';
+import { createClient } from '@supabase/supabase-js';
 import StubHubSearcher from '@/src/stub-hub';
 import VividSeatsSearcher from '@/src/vivid-seats';
 import { parse, format } from 'date-fns';
@@ -7,10 +7,28 @@ import type { Event, SearchParams, SearchResult, TicketSource, Section, Ticket }
 
 export class SearchService {
   private supabase;
+  private stubHubSearcher;
+  private vividSeatsSearcher;
   private searchTimeout = 120000; // 2 minute timeout
 
   constructor() {
-    this.supabase = createClient(config.supabase.url, config.supabase.serviceKey);
+    // Log config for debugging
+    console.log('Initializing SearchService with config:', {
+      hasUrl: !!config.supabase.url,
+      hasAnonKey: !!config.supabase.anonKey
+    });
+
+    if (!config.supabase.url || !config.supabase.anonKey) {
+      throw new Error('Supabase configuration is missing');
+    }
+
+    this.supabase = createClient(
+      config.supabase.url,
+      config.supabase.anonKey
+    );
+    
+    this.stubHubSearcher = new StubHubSearcher();
+    this.vividSeatsSearcher = new VividSeatsSearcher();
   }
 
   async searchAll(params: SearchParams): Promise<SearchResult> {
@@ -63,8 +81,7 @@ export class SearchService {
 
   private async searchVividSeats(params: SearchParams) {
     try {
-      const searcher = new VividSeatsSearcher();
-      const events = await searcher.searchConcerts(params.keyword, '', params.location);
+      const events = await this.vividSeatsSearcher.searchConcerts(params.keyword, '', params.location);
       
       for (const event of events) {
         try {
@@ -101,8 +118,7 @@ export class SearchService {
 
   private async searchStubHub(params: SearchParams) {
     try {
-      const searcher = new StubHubSearcher();
-      const events = await searcher.searchConcerts(params.keyword, '', params.location);
+      const events = await this.stubHubSearcher.searchConcerts(params.keyword, '', params.location);
       
       // Store each event with its tickets
       for (const event of events) {
