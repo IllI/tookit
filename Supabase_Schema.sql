@@ -7,39 +7,38 @@ ALTER TABLE IF EXISTS subscriber ENABLE ROW LEVEL SECURITY;
 
 -- Create events table
 CREATE TABLE IF NOT EXISTS events (
-    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name TEXT NOT NULL,
-    type TEXT,
-    category TEXT,
-    date TIMESTAMP WITH TIME ZONE NOT NULL,
+    date TIMESTAMPTZ NOT NULL,
     venue TEXT NOT NULL,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    category TEXT,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Create event_links table
 CREATE TABLE IF NOT EXISTS event_links (
-    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-    event_id UUID REFERENCES events(id) ON DELETE CASCADE,
-    source TEXT NOT NULL CHECK (source IN ('stubhub', 'vividseats', 'viagogo', 'ticketmaster', 'axs')),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    event_id UUID NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+    source TEXT NOT NULL,
     url TEXT NOT NULL,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(event_id, source)
 );
 
 -- Create tickets table
 CREATE TABLE IF NOT EXISTS tickets (
-    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-    event_id UUID REFERENCES events(id) ON DELETE CASCADE,
-    price DECIMAL(10,2) NOT NULL,
-    type TEXT,
-    section TEXT,
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    event_id UUID NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+    section TEXT NOT NULL,
     row TEXT,
-    quantity INTEGER,
-    date_posted TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    source TEXT NOT NULL CHECK (source IN ('stubhub', 'vividseats', 'viagogo', 'ticketmaster', 'axs')),
-    url TEXT,
-    raw_data JSONB
+    price NUMERIC NOT NULL,
+    quantity INT,
+    source TEXT NOT NULL,
+    listing_id TEXT,
+    date_posted TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    sold BOOLEAN DEFAULT FALSE,
+    UNIQUE(event_id, source, listing_id)
 );
 
 -- Create subscriber table
