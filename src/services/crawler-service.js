@@ -196,43 +196,26 @@ class CrawlerService {
 
           if (pageContent.hasValidContent) {
             console.log('Valid content found, parsing...');
-            console.log('Sending content to Claude...');
             const analysis = await this.parser.parseContent(pageContent.text, options.url);
             
             if (analysis.events?.length) {
-              // Extract event URL from search page
-              const eventUrl = await page.evaluate((source) => {
-                const selector = source.includes('stubhub') 
-                  ? 'a[href*="/my-chemical-romance-tickets-"]'
-                  : 'a[href*="/my-chemical-romance-tickets/"]';
-                const link = document.querySelector(selector);
-                return link ? link.getAttribute('href') : null;
-              }, options.url);
+              // Filter out parking and other auxiliary events
+              const validEvents = analysis.events.filter(event => {
+                const name = event.name.toLowerCase();
+                return !name.includes('parking') && 
+                       !name.includes('vip') && 
+                       !name.includes('meet and greet');
+              });
 
-              if (eventUrl) {
-                // Construct full event URL
-                const baseUrl = options.url.includes('stubhub') 
-                  ? 'https://www.stubhub.com'
-                  : 'https://www.vividseats.com';
-                const fullEventUrl = `${baseUrl}${eventUrl}`;
-
-                // Filter and process events with the actual event URL
-                const validEvents = analysis.events.filter(event => {
-                  const name = event.name.toLowerCase();
-                  return !name.includes('parking') && 
-                         !name.includes('vip') && 
-                         !name.includes('meet and greet');
-                });
-
-                if (validEvents.length > 0) {
-                  await this.processEvents(validEvents.map(event => ({
-                    ...event,
-                    source: options.url.includes('stubhub') ? 'stubhub' : 'vividseats',
-                    link: fullEventUrl  // Use the actual event URL instead of search URL
-                  })));
-                }
+              if (validEvents.length > 0) {
+                await this.processEvents(validEvents.map(event => ({
+                  ...event,
+                  source: options.url.includes('stubhub') ? 'stubhub' : 'vividseats',
+                  link: pageContent.url
+                })));
               }
             }
+            
             return analysis;
           }
 
@@ -422,93 +405,6 @@ class CrawlerService {
     } catch (e) {
       console.error('Date parsing error:', e);
       return null;
-    }
-  }
-
-  async scrapeEventTickets(eventId, source, searchUrl) {
-    try {
-      console.log(`Finding event page from: ${searchUrl}`);
-      
-      const xcrawl = await import('x-crawl');
-      const crawler = xcrawl.default({
-        maxRetry: 3,
-        intervalTime: { max: 8000, min: 3000 },
-        navigationTimeout: 30000,
-        headless: false,
-        launchOptions: {
-          args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--window-size=1920,1080',
-            '--disable-blink-features=AutomationControlled'
-          ]
-        }
-      });
-
-      const result = await crawler.crawlPage({
-        targets: [{ url: searchUrl }],
-        callback: async ({ page }) => {
-          await page.waitForTimeout(5000);
-
-          // Extract the actual event URL based on the source
-          const eventUrl = await page.evaluate((src) => {
-            const selector = src === 'stubhub' 
-              ? 'a[href*="/my-chemical-romance-tickets-"]'
-              : 'a[href*="/my-chemical-romance-tickets/"]';
-            const link = document.querySelector(selector);
-            return link ? link.getAttribute('href') : null;
-          }, source);
-
-          if (!eventUrl) {
-            console.error('Could not find event URL');
-            return;
-          }
-
-          // Construct full URL
-          const baseUrl = source === 'stubhub' 
-            ? 'https://www.stubhub.com'
-            : 'https://www.vividseats.com';
-          const fullEventUrl = `${baseUrl}${eventUrl}`;
-
-          console.log(`Found event page: ${fullEventUrl}`);
-
-          // Navigate to actual event page
-          await page.goto(fullEventUrl, { waitUntil: 'networkidle0' });
-          await page.waitForTimeout(5000);
-
-          const content = await page.evaluate(() => document.body.innerText);
-          console.log('Parsing ticket data...');
-
-          const ticketData = await this.parser.parseTickets(content);
-          if (Array.isArray(ticketData) && ticketData.length > 0) {
-            const { error } = await this.supabase
-              .from('tickets')
-              .upsert(
-                ticketData.map(ticket => ({
-                  event_id: eventId,
-                  section: ticket.section || 'General',
-                  row: ticket.row,
-                  price: parseFloat(ticket.price) || 0,
-                  quantity: parseInt(String(ticket.quantity)) || 1,
-                  source: source,
-                  listing_id: ticket.listing_id || `${source}-${Date.now()}`,
-                  date_posted: new Date().toISOString(),
-                  sold: false
-                }))
-              );
-
-            if (error) {
-              console.error('Error saving tickets:', error);
-            } else {
-              console.log(`Saved ${ticketData.length} tickets`);
-            }
-          }
-        }
-      });
-
-      return result.data;
-    } catch (error) {
-      console.error('Error scraping tickets:', error);
     }
   }
 }
