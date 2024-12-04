@@ -133,24 +133,24 @@ class CrawlerService {
           }
 
           // Wait and scroll
-          console.log('Waiting for initial load...');
-          await page.waitForTimeout(5000);
+          // console.log('Waiting for initial load...');
+          // await page.waitForTimeout(5000);
 
-          // Scroll to load dynamic content
-          await page.evaluate(async () => {
-            await new Promise((resolve) => {
-              let totalHeight = 0;
-              const distance = 100;
-              const timer = setInterval(() => {
-                window.scrollBy(0, distance);
-                totalHeight += distance;
-                if (totalHeight >= document.body.scrollHeight) {
-                  clearInterval(timer);
-                  resolve();
-                }
-              }, 100);
-            });
-          });
+          // // Scroll to load dynamic content
+          // await page.evaluate(async () => {
+          //   await new Promise((resolve) => {
+          //     let totalHeight = 0;
+          //     const distance = 100;
+          //     const timer = setInterval(() => {
+          //       window.scrollBy(0, distance);
+          //       totalHeight += distance;
+          //       if (totalHeight >= document.body.scrollHeight) {
+          //         clearInterval(timer);
+          //         resolve();
+          //       }
+          //     }, 100);
+          //   });
+          // });
 
           // Check for valid content based on site
           const pageContent = await page.evaluate(() => {
@@ -211,7 +211,7 @@ class CrawlerService {
                 await this.processEvents(validEvents.map(event => ({
                   ...event,
                   source: options.url.includes('stubhub') ? 'stubhub' : 'vividseats',
-                  link: pageContent.url
+                  //link: pageContent.url
                 })));
               }
             }
@@ -285,21 +285,21 @@ class CrawlerService {
           console.log('Created new event:', newEvent.name);
         }
 
-        // Add event link if it doesn't exist
-        if (event.link) {
+        // Use eventUrl from Claude's response instead of the search page URL
+        if (event.eventUrl) {
           const { error: linkError } = await this.supabase
             .from('event_links')
             .upsert({
               event_id: eventId,
               source: event.source,
-              url: event.link
+              url: event.eventUrl  // Use eventUrl here
             }, {
               onConflict: 'event_id,source'
             });
 
           if (!linkError) {
-            console.log(`Added ${event.source} link for event`);
-            await this.visitEventPage(eventId, event.source, event.link);
+            console.log(`Added ${event.source} link for event: ${event.eventUrl}`);
+            await this.visitEventPage(eventId, event.source, event.eventUrl);
           }
         }
       }

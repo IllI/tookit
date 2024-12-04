@@ -6,6 +6,7 @@ interface EventData {
   venue: string;
   location: string;
   price?: string;
+  eventUrl?: string;
 }
 
 interface ParsedEvents {
@@ -14,6 +15,7 @@ interface ParsedEvents {
 
 class ClaudeParser {
   private SYSTEM_PROMPT = `Extract event information from webpage content. 
+    For each event, find and include the URL that links directly to the event's ticket page.
     Return only valid JSON matching this structure: 
     {
       "events": [
@@ -22,7 +24,8 @@ class ClaudeParser {
           "date": string,
           "venue": string,
           "location": string,
-          "price": string (optional)
+          "price": string (optional),
+          "eventUrl": string (the full URL to the event's ticket page)
         }
       ]
     }`;
@@ -35,7 +38,7 @@ class ClaudeParser {
     });
   }
 
-  async parseContent(content: string, url: string): Promise<ParsedEvents> {
+  async parseContent(content: string, url: string, searchParams?: { keyword: string, location: string }): Promise<ParsedEvents> {
     try {
       console.log('Sending content to Claude...');
       const completion = await this.claude.messages.create({
@@ -44,9 +47,14 @@ class ClaudeParser {
         system: this.SYSTEM_PROMPT,
         messages: [{
           role: "user",
-          content: `Parse these events and return ONLY valid JSON:
+          content: `Parse these events and return ONLY valid JSON.
+                   Search for events matching: "${searchParams?.keyword || ''}" in "${searchParams?.location || ''}"
+                   Look for links containing these terms.
                    URL: ${url}
-                   Content: ${content}`
+                   Content: ${content}
+                   
+                   Important: For each event, find and include the URL that links directly to the event's ticket page.
+                   The eventUrl should be a complete URL starting with http:// or https://`
         }]
       });
 
