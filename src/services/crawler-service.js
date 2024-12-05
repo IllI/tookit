@@ -285,21 +285,53 @@ class CrawlerService {
           console.log('Created new event:', newEvent.name);
         }
 
-        // Use eventUrl from Claude's response instead of the search page URL
         if (event.eventUrl) {
           const { error: linkError } = await this.supabase
             .from('event_links')
             .upsert({
               event_id: eventId,
               source: event.source,
-              url: event.eventUrl  // Use eventUrl here
+              url: event.eventUrl
             }, {
               onConflict: 'event_id,source'
             });
 
           if (!linkError) {
             console.log(`Added ${event.source} link for event: ${event.eventUrl}`);
-            await this.visitEventPage(eventId, event.source, event.eventUrl);
+            
+            // Use existing crawlPage method to visit event page
+            const ticketPageResult = await this.crawlPage({
+              url: event.eventUrl,
+              callback: async ({ page }) => {
+                const content = await page.evaluate(() => document.body.innerText);
+                console.log('Parsing ticket data...');
+                
+                const ticketData = await this.parser.parseTicketPage(content, event.source);
+                if (Array.isArray(ticketData) && ticketData.length > 0) {
+                  const { error } = await this.supabase
+                    .from('tickets')
+                    .upsert(
+                      ticketData.map(ticket => ({
+                        event_id: eventId,
+                        section: ticket.section || 'General',
+                        row: ticket.row,
+                        price: parseFloat(ticket.price) || 0,
+                        quantity: parseInt(String(ticket.quantity)) || 1,
+                        source: event.source,
+                        listing_id: ticket.listing_id || `${event.source}-${Date.now()}`,
+                        date_posted: new Date().toISOString(),
+                        sold: false
+                      }))
+                    );
+
+                  if (error) {
+                    console.error('Error saving tickets:', error);
+                  } else {
+                    console.log(`Saved ${ticketData.length} tickets for event`);
+                  }
+                }
+              }
+            });
           }
         }
       }
@@ -317,82 +349,6 @@ class CrawlerService {
       } catch (error) {
         console.error('Error closing browser:', error);
       }
-    }
-  }
-
-  async visitEventPage(eventId, source, eventUrl) {
-    let browser;
-    try {
-        console.log(`Visiting event page: ${eventUrl}`);
-        
-        const xcrawl = await import('x-crawl');
-        const crawler = xcrawl.default({
-            maxRetry: 3,
-            intervalTime: { max: 8000, min: 3000 },
-            navigationTimeout: 30000,
-            headless: false,
-            launchOptions: {
-                args: [
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                    '--window-size=1920,1080',
-                    '--disable-blink-features=AutomationControlled'
-                ]
-            }
-        });
-
-        browser = await crawler.launch();
-        const page = await browser.newPage();
-
-        // Apply successful bot evasion techniques
-        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
-        await page.setViewport({ width: 1920, height: 1080 });
-        await page.setExtraHTTPHeaders({
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Connection': 'keep-alive'
-        });
-
-        const result = await crawler.crawlPage({
-            url: eventUrl,
-            callback: async ({ page }) => {
-                await page.waitForTimeout(5000);
-
-                const content = await page.evaluate(() => document.body.innerText);
-                console.log('Got event page content, parsing tickets...');
-
-                const ticketData = await this.parser.parseTickets(content);
-                if (Array.isArray(ticketData) && ticketData.length > 0) {
-                    const { error } = await this.supabase
-                        .from('tickets')
-                        .upsert(
-                            ticketData.map(ticket => ({
-                                event_id: eventId,
-                                section: ticket.section || 'General',
-                                row: ticket.row,
-                                price: parseFloat(ticket.price) || 0,
-                                quantity: parseInt(String(ticket.quantity)) || 1,
-                                source: source,
-                                listing_id: ticket.listing_id || `${source}-${Date.now()}`,
-                                date_posted: new Date().toISOString(),
-                                sold: false
-                            }))
-                        );
-
-                    if (error) {
-                        console.error('Error saving tickets:', error);
-                    } else {
-                        console.log(`Saved ${ticketData.length} tickets for event`);
-                    }
-                }
-            }
-        });
-
-        return result.data;
-    } catch (error) {
-        console.error('Error visiting event page:', error);
-    } finally {
-        await this.cleanup(browser);
     }
   }
 
