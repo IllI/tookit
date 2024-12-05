@@ -1,259 +1,200 @@
+import { createClient } from '@supabase/supabase-js';
 import puppeteer from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import { getParser } from './llm-service';
-import { config } from '@/src/config/env';
-import { EventProcessor } from './event-processor';
-import { createCrawl } from 'x-crawl';
-import { createClient } from '@supabase/supabase-js';
 
-// Add stealth plugin
 puppeteer.use(StealthPlugin());
 
 class CrawlerService {
   constructor() {
     this.browser = null;
     this.parser = getParser();
-    this.retryDelays = [5000, 10000, 15000];
     this.maxAttempts = 3;
+    this.retryDelays = [2000, 3000, 4000];
     
-    // Update selectors to match actual page content
-    this.siteConfigs = {
-      stubhub: {
-        selector: '[data-testid="event-list"]',
-        minContentLength: 500,
-        expectedTitle: /StubHub/i
-      },
-      vividseats: {
-        // Update selector to match what we see on the page
-        selector: '.search-results',  // or another selector that matches the content
-        minContentLength: 500,
-        expectedTitle: /Vivid Seats/i
-      }
-    };
-
-    this.eventProcessor = new EventProcessor();
+    // Initialize Supabase client
     this.supabase = createClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL,
       process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
     );
   }
 
-  getSiteConfig(url) {
-    if (url.includes('stubhub')) return this.siteConfigs.stubhub;
-    if (url.includes('vividseats')) return this.siteConfigs.vividseats;
-    throw new Error('Unknown site');
-  }
-
   async initialize() {
     if (!this.browser) {
-      try {
-        // Launch browser with stealth
-        this.browser = await puppeteer.launch({
-          headless: false,
-          args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--window-size=1920,1080',
-            '--disable-blink-features=AutomationControlled',
-            '--disable-features=IsolateOrigins,site-per-process',
-          ],
-          ignoreDefaultArgs: ['--enable-automation']
-        });
-
-        console.log('Services initialized');
-      } catch (error) {
-        console.error('Failed to initialize services:', error);
-        throw error;
-      }
+      this.browser = await puppeteer.launch({
+        headless: false,
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--window-size=1920,1080',
+          '--disable-blink-features=AutomationControlled'
+        ],
+        ignoreDefaultArgs: ['--enable-automation']
+      });
+      console.log('Browser initialized');
     }
     return { browser: this.browser };
   }
 
-  // Add method to crawl sites sequentially
-  async crawlSites(sites) {
-    const results = [];
-    
-    // Handle one site at a time
-    for (const site of sites) {
-      console.log(`Processing ${site.url}...`);
-      const result = await this.crawlPage(site);
-      results.push(result);
-      
-      // Wait between sites
-      await new Promise(r => setTimeout(r, 5000));
-    }
-    
-    return results;
-  }
-
   async crawlPage(options) {
-    const { browser } = await this.initialize();
-    console.log(`Starting crawl for: ${options.url}`);
+    const url = typeof options === 'string' ? options : options?.url;
+    
+    if (!url || typeof url !== 'string') {
+      throw new Error('Invalid URL provided to crawlPage');
+    }
 
+    const { browser } = await this.initialize();
     let context = null;
     let page = null;
-    let currentAttempt = 1;
+    let attempt = 1;
 
     try {
       context = await browser.createIncognitoBrowserContext();
       page = await context.newPage();
-
-      // Set up page
+      
+      // Universal stealth setup
       await page.setViewport({ width: 1920, height: 1080 });
       await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
-
-      // Add browser fingerprinting evasion
-      await page.evaluateOnNewDocument(() => {
-        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-        Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-        window.chrome = {
-          runtime: {},
-          loadTimes: () => {},
-          csi: () => {},
-          app: { isInstalled: false }
-        };
+      await page.setExtraHTTPHeaders({
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'sec-ch-ua': '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"Windows"'
       });
 
-      while (currentAttempt <= this.maxAttempts) {
-        console.log(`Attempt ${currentAttempt}/${this.maxAttempts} for ${options.url}`);
-
+      while (attempt <= this.maxAttempts) {
         try {
-          // Navigate or reload
-          if (currentAttempt === 1) {
-            await page.goto(options.url, { 
-              waitUntil: ['networkidle0', 'domcontentloaded'],
-              timeout: 30000 
-            });
-          } else {
-            console.log('Reloading page...');
-            await page.reload({ 
-              waitUntil: ['networkidle0', 'domcontentloaded'],
-              timeout: 30000 
-            });
+          console.log(`Attempt ${attempt}/${this.maxAttempts} to load: ${url}`);
+          
+          await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+          
+          // Add special handling for VividSeats event pages
+          if (url.includes('vividseats') && (url.includes('/tickets/') || url.includes('/event/'))) {
+            try {
+              // Wait longer initially for VividSeats
+              await page.waitForTimeout(5000);
+              
+              // Wait for ticket content
+              await page.waitForFunction(
+                () => {
+                  const content = document.body.innerText;
+                  return content.length > 1000 && 
+                         (content.includes('Section') || content.includes('Row') || content.includes('Quantity'));
+                },
+                { timeout: 15000, polling: 100 }
+              );
+
+              console.log('VividSeats content loaded');
+            } catch (error) {
+              console.log('Error waiting for VividSeats content:', error);
+            }
           }
 
-          // Wait and scroll
-          // console.log('Waiting for initial load...');
-          // await page.waitForTimeout(5000);
+          // Simple wait for content to load
+          await page.waitForFunction(
+            () => document.body && document.body.innerText.length > 500,
+            { timeout: 10000, polling: 100 }
+          );
 
-          // // Scroll to load dynamic content
-          // await page.evaluate(async () => {
-          //   await new Promise((resolve) => {
-          //     let totalHeight = 0;
-          //     const distance = 100;
-          //     const timer = setInterval(() => {
-          //       window.scrollBy(0, distance);
-          //       totalHeight += distance;
-          //       if (totalHeight >= document.body.scrollHeight) {
-          //         clearInterval(timer);
-          //         resolve();
-          //       }
-          //     }, 100);
-          //   });
-          // });
+          // Get page content
+          const content = await page.evaluate(() => ({
+            text: document.body.innerText,
+            html: document.documentElement.outerHTML,
+            title: document.title,
+            url: window.location.href,
+            contentLength: document.body.innerText.length
+          }));
 
-          // Check for valid content based on site
-          const pageContent = await page.evaluate(() => {
-            const isStubHub = window.location.href.includes('stubhub');
-            const isVividSeats = window.location.href.includes('vividseats');
+          console.log('Page state:', {
+            url: content.url,
+            title: content.title,
+            contentLength: content.contentLength
+          });
 
-            // Debug logging
-            console.log('Page evaluation:', {
-              contentLength: document.body.innerText.length,
-              hasMCR: document.body.innerText.includes('My Chemical Romance'),
-              url: window.location.href
-            });
+          if (content.contentLength > 500) {
+            console.log('Page loaded successfully');
+            
+            // Parse content with Claude based on URL type
+            const isSearchPage = content.url.includes('search');
+            const source = url.includes('stubhub') ? 'stubhub' : 'vividseats';
+            
+            console.log(`Sending content to Claude for ${isSearchPage ? 'search' : 'ticket'} parsing...`);
+            
+            const parsedContent = await this.parser.parseContent(
+              content.text,
+              content.url,
+              isSearchPage ? options.searchParams : undefined,
+              !isSearchPage
+            );
 
-            let hasValidContent = false;
-
-            if (isStubHub) {
-              // StubHub validation
-              hasValidContent = document.body.innerText.length > 1000 && 
-                              document.body.innerText.includes('My Chemical Romance') &&
-                              !document.body.innerText.includes('recaptcha');
-            } else if (isVividSeats) {
-              // VividSeats validation
-              hasValidContent = document.body.innerText.length > 500 && 
-                              document.body.innerText.includes('My Chemical Romance');
+            // Process events if this was a search page
+            if (isSearchPage && parsedContent?.events) {
+              await this.processEventData(parsedContent, source);
+            } 
+            // Process tickets if this was an event page
+            else if (!isSearchPage && parsedContent?.tickets) {
+              const eventId = options.eventId; // Pass this from processEventData
+              await this.processTicketData(parsedContent.tickets, eventId, source);
             }
 
             return {
-              text: document.body.innerText,
-              html: document.documentElement.outerHTML,
-              title: document.title,
-              url: window.location.href,
-              hasValidContent,
-              contentLength: document.body.innerText.length
+              ...content,
+              parsedContent
             };
-          });
-
-          console.log('Page state:', {
-            url: pageContent.url,
-            contentLength: pageContent.contentLength,
-            title: pageContent.title,
-            hasValidContent: pageContent.hasValidContent
-          });
-
-          if (pageContent.hasValidContent) {
-            console.log('Valid content found, parsing...');
-            const analysis = await this.parser.parseContent(pageContent.text, options.url);
-            
-            if (analysis.events?.length) {
-              // Filter out parking and other auxiliary events
-              const validEvents = analysis.events.filter(event => {
-                const name = event.name.toLowerCase();
-                return !name.includes('parking') && 
-                       !name.includes('vip') && 
-                       !name.includes('meet and greet');
-              });
-
-              if (validEvents.length > 0) {
-                await this.processEvents(validEvents.map(event => ({
-                  ...event,
-                  source: options.url.includes('stubhub') ? 'stubhub' : 'vividseats',
-                  //link: pageContent.url
-                })));
-              }
-            }
-            
-            return analysis;
-          }
-
-          if (currentAttempt === 2 && pageContent.contentLength > 1500) {
-            console.log('Second attempt has substantial content, proceeding with parsing...');
-            const analysis = await this.parser.parseContent(pageContent.text, options.url);
-            console.log(`Found ${analysis.events?.length || 0} events`);
-            return analysis;
           }
 
           console.log('Invalid content, retrying...');
-          await new Promise(r => setTimeout(r, this.retryDelays[currentAttempt - 1]));
-          currentAttempt++;
+          await page.waitForTimeout(this.retryDelays[attempt - 1]);
+          attempt++;
 
         } catch (error) {
-          console.error(`Error in attempt ${currentAttempt}:`, error);
-          await new Promise(r => setTimeout(r, this.retryDelays[currentAttempt - 1]));
-          currentAttempt++;
+          console.error(`Error in attempt ${attempt}:`, error);
+          if (attempt === this.maxAttempts) throw error;
+          await page.waitForTimeout(this.retryDelays[attempt - 1]);
+          attempt++;
         }
       }
 
-      return { events: [] };
+      throw new Error('Failed to load page after all attempts');
 
     } finally {
       if (context) await context.close();
     }
   }
 
-  async processEvents(events) {
-    try {
-      for (const event of events) {
-        const date = this.normalizeDate(event.date);
-        if (!date) continue;
+  async cleanup() {
+    if (this.browser) {
+      await this.browser.close();
+      this.browser = null;
+      console.log('Browser closed');
+    }
+  }
+
+  async processEventData(parsedEvents, source) {
+    if (!parsedEvents?.events?.length) {
+      console.log(`No events found for ${source}`);
+      return;
+    }
+
+    for (const event of parsedEvents.events) {
+      try {
+        // Skip parking and auxiliary events
+        if (event.name.toLowerCase().includes('parking')) {
+          console.log('Skipping parking event:', event.name);
+          continue;
+        }
+
+        const date = new Date(event.date);
+        if (isNaN(date.getTime())) {
+          console.error('Invalid date format:', event.date);
+          continue;
+        }
 
         // Check for existing event
-        const { data: existingEvents } = await this.supabase
+        const { data: existingEvent } = await this.supabase
           .from('events')
-          .select('id, name')
+          .select('id')
           .eq('name', event.name)
           .eq('date', date.toISOString())
           .eq('venue', event.venue)
@@ -261,10 +202,45 @@ class CrawlerService {
 
         let eventId;
 
-        if (existingEvents) {
-          eventId = existingEvents.id;
-          console.log('Found existing event:', existingEvents.name);
+        if (existingEvent) {
+          console.log('Found existing event:', event.name);
+          eventId = existingEvent.id;
+
+          // Check for existing event link
+          const { data: existingLink } = await this.supabase
+            .from('event_links')
+            .select('url')
+            .eq('event_id', eventId)
+            .eq('source', source)
+            .single();
+
+          if (existingLink) {
+            if (existingLink.url === event.eventUrl) {
+              console.log(`Event link for ${source} already exists and matches`);
+            } else {
+              console.log(`Updating ${source} link for event`);
+              await this.supabase
+                .from('event_links')
+                .upsert({
+                  event_id: eventId,
+                  source,
+                  url: event.eventUrl
+                }, {
+                  onConflict: 'event_id,source'
+                });
+            }
+          } else {
+            console.log(`Adding new ${source} link for existing event`);
+            await this.supabase
+              .from('event_links')
+              .insert({
+                event_id: eventId,
+                source,
+                url: event.eventUrl
+              });
+          }
         } else {
+          // Create new event
           const { data: newEvent, error: eventError } = await this.supabase
             .from('events')
             .insert([{
@@ -282,85 +258,84 @@ class CrawlerService {
           }
 
           eventId = newEvent.id;
-          console.log('Created new event:', newEvent.name);
-        }
+          console.log('Created new event:', event.name);
 
-        if (event.eventUrl) {
-          const { error: linkError } = await this.supabase
+          // Create event link
+          await this.supabase
             .from('event_links')
-            .upsert({
+            .insert({
               event_id: eventId,
-              source: event.source,
+              source,
               url: event.eventUrl
-            }, {
-              onConflict: 'event_id,source'
             });
-
-          if (!linkError) {
-            console.log(`Added ${event.source} link for event: ${event.eventUrl}`);
-            
-            // Use existing crawlPage method to visit event page
-            const ticketPageResult = await this.crawlPage({
-              url: event.eventUrl,
-              callback: async ({ page }) => {
-                const content = await page.evaluate(() => document.body.innerText);
-                console.log('Parsing ticket data...');
-                
-                const ticketData = await this.parser.parseTicketPage(content, event.source);
-                if (Array.isArray(ticketData) && ticketData.length > 0) {
-                  const { error } = await this.supabase
-                    .from('tickets')
-                    .upsert(
-                      ticketData.map(ticket => ({
-                        event_id: eventId,
-                        section: ticket.section || 'General',
-                        row: ticket.row,
-                        price: parseFloat(ticket.price) || 0,
-                        quantity: parseInt(String(ticket.quantity)) || 1,
-                        source: event.source,
-                        listing_id: ticket.listing_id || `${event.source}-${Date.now()}`,
-                        date_posted: new Date().toISOString(),
-                        sold: false
-                      }))
-                    );
-
-                  if (error) {
-                    console.error('Error saving tickets:', error);
-                  } else {
-                    console.log(`Saved ${ticketData.length} tickets for event`);
-                  }
-                }
-              }
-            });
-          }
+          console.log(`Added ${source} link for new event`);
         }
+
+        // Visit event page to scrape tickets
+        if (event.eventUrl) {
+          console.log(`Visiting event page: ${event.eventUrl}`);
+          const eventPageContent = await this.crawlPage({
+            url: event.eventUrl,
+            eventId // Pass eventId for ticket processing
+          });
+        }
+
+      } catch (error) {
+        console.error('Error processing event:', error);
+      }
+    }
+  }
+
+  async processTicketData(tickets, eventId, source) {
+    console.log(`Processing tickets for ${source}:`, {
+      eventId,
+      ticketsFound: tickets?.length || 0,
+      firstTicket: tickets?.[0]
+    });
+
+    // Early return if no tickets or eventId
+    if (!tickets || !Array.isArray(tickets) || tickets.length === 0) {
+      console.log(`No valid tickets array found for ${source} event ${eventId}`);
+      return;
+    }
+
+    if (!eventId) {
+      console.error('No eventId provided for ticket processing');
+      return;
+    }
+
+    try {
+      const ticketData = tickets.map(ticket => ({
+        event_id: eventId,
+        section: ticket.section || 'General',
+        row: ticket.row || null,
+        price: typeof ticket.price === 'number' ? ticket.price : parseFloat(String(ticket.price).replace(/[^0-9.]/g, '')) || 0,
+        quantity: typeof ticket.quantity === 'number' ? ticket.quantity : parseInt(String(ticket.quantity)) || 1,
+        source: source,
+        listing_id: ticket.listing_id || `${source}-${Date.now()}-${Math.random()}`,
+        date_posted: new Date().toISOString(),
+        sold: false
+      }));
+
+      console.log(`Prepared ${ticketData.length} tickets for saving. First ticket:`, ticketData[0]);
+
+      const { data, error } = await this.supabase
+        .from('tickets')
+        .upsert(ticketData, { 
+          onConflict: 'event_id,source,listing_id',
+          returning: true 
+        });
+
+      if (error) {
+        console.error('Error saving tickets:', error);
+      } else {
+        console.log(`Successfully saved ${data.length} tickets for ${source} event ${eventId}`);
       }
     } catch (error) {
-      console.error('Failed to process events:', error);
-    }
-  }
-
-  async cleanup() {
-    if (this.browser) {
-      try {
-        await this.browser.close();
-        this.browser = null;
-        console.log('Browser closed successfully');
-      } catch (error) {
-        console.error('Error closing browser:', error);
-      }
-    }
-  }
-
-  normalizeDate(dateStr) {
-    try {
-      // Remove day of week if present
-      const cleanDate = dateStr.replace(/^(MON|TUE|WED|THU|FRI|SAT|SUN)\s+/i, '');
-      const parsed = new Date(cleanDate);
-      return parsed.toString() !== 'Invalid Date' ? parsed : null;
-    } catch (e) {
-      console.error('Date parsing error:', e);
-      return null;
+      console.error(`Failed to process tickets for ${source}:`, error, {
+        eventId,
+        ticketCount: tickets?.length
+      });
     }
   }
 }

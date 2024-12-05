@@ -21,7 +21,9 @@ class ClaudeParser {
     3. Extract the href attribute value from that <a> tag
     4. Verify the URL matches the expected pattern for the source site:
        - StubHub: should contain '/event/' or '/tickets/'. 
-       - VividSeats: should contain '/tickets/' or similar ticket page pattern
+         Example: 'https://www.stubhub.com/my-chemical-romance-chicago-tickets-8-29-2025/event/156178199/'
+       - VividSeats: should contain '/tickets/' or similar ticket page pattern.
+         Example: 'https://www.vividseats.com/my-chemical-romance-tickets-chicago-soldier-field-8-29-2025--concerts-rock/production/5354970'
     
     Return only valid JSON matching this structure: 
     {
@@ -32,12 +34,39 @@ class ClaudeParser {
           "venue": string,
           "location": string,
           "price": string (optional),
-          "eventUrl": string (must be the exact href value from the event's <a> tag)
+          "eventUrl": string (must be the exact href value from the event's <a> tag, including domain)
         }
       ]
     }
 
-    Important: Do not generate or guess URLs. Only include eventUrl if you find an actual <a> tag linking to the event's ticket page.`;
+    Important: 
+    1. Do not generate or guess URLs. Only include eventUrl if you find an actual <a> tag linking to the event's ticket page
+    2. For relative URLs (starting with '/'), prepend the appropriate domain:
+       - StubHub: 'https://www.stubhub.com'
+       - VividSeats: 'https://www.vividseats.com'
+    3. Remove any unnecessary query parameters from URLs (like qid, iid, etc.)
+    4. Verify that extracted URLs contain the full domain and path`;
+
+  private TICKET_PROMPT = `Extract ticket listing information from the event page content.
+    Return only valid JSON matching this structure:
+    {
+      "tickets": [
+        {
+          "section": string,
+          "row": string (optional),
+          "price": number (no currency symbols, just the number),
+          "quantity": number,
+          "listing_id": string (optional)
+        }
+      ]
+    }
+
+    Important:
+    1. Remove any currency symbols from prices
+    2. Convert all prices to numbers
+    3. Ensure quantities are numbers
+    4. Include section names exactly as shown
+    5. Include row information if available`;
 
   private claude: Anthropic;
 
@@ -47,38 +76,44 @@ class ClaudeParser {
     });
   }
 
-  async parseContent(content: string, url: string, searchParams?: { keyword: string, location: string }): Promise<ParsedEvents> {
+  async parseContent(
+    content: string, 
+    url: string, 
+    searchParams?: { keyword: string, location: string },
+    isEventPage?: boolean
+  ): Promise<ParsedEvents> {
+    const prompt = isEventPage ? this.TICKET_PROMPT : this.SYSTEM_PROMPT;
+
     try {
-      console.log('Sending content to Claude...');
+      console.log(`Sending content to Claude for ${isEventPage ? 'ticket' : 'event'} parsing...`);
       const completion = await this.claude.messages.create({
         model: 'claude-3-sonnet-20240229',
         max_tokens: 4096,
-        system: this.SYSTEM_PROMPT,
+        system: prompt + "\nIMPORTANT: Return ONLY the raw JSON object. No explanatory text, no markdown formatting, no notes.",
         messages: [{
           role: "user",
-          content: `Parse these events and return ONLY valid JSON.
-                   Looking for events matching: "${searchParams?.keyword || ''}" in "${searchParams?.location || ''}"
+          content: `Parse this ${isEventPage ? 'ticket page' : 'search page'} and return ONLY a raw JSON object.
+                   ${!isEventPage ? `Looking for events matching: "${searchParams?.keyword || ''}" in "${searchParams?.location || ''}"` : ''}
                    Source URL: ${url}
-                   
-                   Find the event container elements in this HTML content and extract the exact href values from their ticket page links.
                    Content: ${content}
                    
-                   Remember:
-                   1. Only include events that match the search criteria
-                   2. Extract URLs exactly as they appear in href attributes
-                   3. Do not generate or modify URLs
-                   4. If you can't find a valid ticket page link, omit the eventUrl field
-                   5. For StubHub: should contain '/event/' or '/tickets/'. For example: 'https://www.stubhub.com/my-chemical-romance-chicago-tickets-8-29-2025/event/156178199/?qid=4a0b3c8ceee8aa8a132222ff90ad22f6&iid=c0409a16-2b41-4124-a57b-33fe37b699be&index=stubhub_exact&ut=27162dca024b3a38a8f4598058923b241cd793ad'
-                   6. For VividSeats: should contain '/tickets/' or similar ticket page pattern. For example: <a href="/my-chemical-romance-tickets-chicago-soldier-field-8-29-2025--concerts-rock/production/5354970" class="styles_linkContainer__4li3j" id="5354970" data-testid="production-listing-row-5354970"><div class="styles_row__Ma1rH"><div class="styles_rowContent__mKC9N"><div class="styles_leftColumn__uxaP4" data-testid="date-time-left-element"><span class="MuiTypography-root MuiTypography-overline mui-kh4685">Fri</span><span class="MuiTypography-root MuiTypography-small-bold MuiTypography-noWrap mui-1fmntk1">Aug 29</span><span class="MuiTypography-root MuiTypography-small-bold MuiTypography-noWrap mui-1fmntk1">2025</span><span class="MuiTypography-root MuiTypography-caption mui-1pgnteb">6:00pm</span></div><div></div><div class="styles_titleColumn__T_Kfd"><span class="MuiTypography-root MuiTypography-small-medium styles_titleTruncate__XiZ53 mui-pc7loe">My Chemical Romance</span><div class="MuiBox-root mui-k008qs" data-testid="subtitle"><span class="MuiTypography-root MuiTypography-small-regular styles_textTruncate__wsM3Q mui-1insuh9">Soldier Field</span><span class="MuiTypography-root MuiTypography-small-regular mui-1insuh9">&nbsp;•&nbsp;</span><span class="MuiTypography-root MuiTypography-small-regular styles_textTruncate__wsM3Q mui-1wl3fj7">Chicago, IL</span></div></div></div><button class="MuiButtonBase-root MuiButton-root MuiButton-outlined MuiButton-outlinedPrimary MuiButton-sizeSmall MuiButton-outlinedSizeSmall MuiButton-colorPrimary MuiButton-root MuiButton-outlined MuiButton-outlinedPrimary MuiButton-sizeSmall MuiButton-outlinedSizeSmall MuiButton-colorPrimary styles_findTicketsButton__LrJK_ mui-qgcajg" tabindex="0" type="button" data-testid="production-listing-row-button"><span class="MuiTypography-root MuiTypography-small-regular mui-1b4fqit">Find Tickets</span></button></div></a>
-                   7. Ensure links contain the domain and full path of the url are not just relative links
-                   8. Ensure that any trailing unnecessary query parameters in the url are removed
-                   `
+                   IMPORTANT: Return ONLY the JSON object. No explanations, no notes, no markdown.`
         }]
       });
 
-      console.log('Claude response:', completion.content[0].text);
-      const parsedResponse = JSON.parse(completion.content[0].text);
-      return { events: parsedResponse.events || [] };
+      const responseText = completion.content[0].text;
+      
+      // Try to find JSON object in response
+      const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        throw new Error('No JSON object found in response');
+      }
+
+      const cleanJson = jsonMatch[0].trim();
+      console.log('Cleaned Claude response:', cleanJson);
+      
+      const parsedResponse = JSON.parse(cleanJson);
+      return isEventPage ? { events: [], ...parsedResponse } : { events: parsedResponse.events || [] };
     } catch (error) {
       console.error('Claude parsing error:', error);
       return { events: [] };
