@@ -3,11 +3,19 @@ import StubHubSearcher from '@/src/stub-hub';
 import VividSeatsSearcher from '@/src/vivid-seats';
 import type { SearchParams } from '@/lib/types/api';
 import { crawlerService } from '@/src/services/crawler-service';
+import { createClient } from '@supabase/supabase-js';
+import { config } from '@/src/config/env';
 
 export class SearchService extends EventEmitter {
+  private supabase;
+
   constructor() {
     super();
     crawlerService.setSearchService(this);
+    this.supabase = createClient(
+      config.supabase.url,
+      config.supabase.serviceKey || config.supabase.anonKey
+    );
   }
 
   async searchAll(params: SearchParams) {
@@ -20,7 +28,7 @@ export class SearchService extends EventEmitter {
 
       // Run searches in parallel
       this.emit('status', 'Starting searches...');
-      const [vividSeatsEvents, stubHubEvents] = await Promise.all([
+      await Promise.all([
         this.searchVividSeats(params).catch(error => {
           console.error('VividSeats search failed:', error);
           this.emit('status', 'VividSeats search failed');
@@ -33,40 +41,63 @@ export class SearchService extends EventEmitter {
         })
       ]);
 
-      const allEvents = [...vividSeatsEvents, ...stubHubEvents];
-      
-      if (allEvents.length > 0) {
-        this.emit('status', `Processing ${allEvents.length} events...`);
-        
-        // Process events and get tickets
-        for (const event of allEvents) {
-          this.emit('status', `Processing event: ${event.name}`);
-          if (event.eventUrl) {
-            this.emit('status', `Fetching tickets for ${event.name}...`);
-            // Emit tickets as they're found
-            this.emit('tickets', [event]);
-          }
-        }
+      // After searches complete, fetch all tickets from database
+      this.emit('status', 'Fetching tickets...');
+      const { data: tickets, error } = await this.supabase
+        .from('tickets')
+        .select(`
+          id,
+          event_id,
+          section,
+          row,
+          price,
+          quantity,
+          source,
+          listing_id,
+          event:events(
+            name,
+            date,
+            venue
+          )
+        `)
+        .order('price');
 
+      if (error) {
+        throw error;
+      }
+
+      // Format ticket data
+      const formattedTickets = tickets?.map(ticket => ({
+        ...ticket,
+        price: parseFloat(ticket.price) || 0,
+        event: ticket.event ? {
+          ...ticket.event,
+          date: ticket.event.date ? new Date(ticket.event.date).toLocaleString() : 'Date TBD'
+        } : null
+      })) || [];
+
+      if (formattedTickets.length > 0) {
+        this.emit('status', `Found ${formattedTickets.length} total tickets`);
+        this.emit('tickets', formattedTickets);
+        
         return {
           success: true,
-          data: allEvents,
-          metadata: { totalEvents: allEvents.length }
+          data: formattedTickets,
+          metadata: { totalTickets: formattedTickets.length }
         };
       }
 
-      this.emit('status', 'No events found');
+      this.emit('status', 'No tickets found');
       return {
         success: true,
         data: [],
-        metadata: { totalEvents: 0 }
+        metadata: { totalTickets: 0 }
       };
 
     } catch (error) {
       this.emit('error', error instanceof Error ? error.message : 'Search failed');
       throw error;
     } finally {
-      // Cleanup
       await crawlerService.cleanup();
     }
   }

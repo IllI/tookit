@@ -98,35 +98,32 @@ class CrawlerService {
           
           await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
           
-          // Add special handling for VividSeats event pages
-          if (url.includes('vividseats') && (url.includes('/tickets/') || url.includes('/event/'))) {
+          // Add special handling for ticket pages
+          const isEventPage = !url.includes('search');
+          if (isEventPage) {
             try {
-              // Wait longer initially for VividSeats
               await page.waitForTimeout(5000);
-              
-              // Wait for ticket content
               await page.waitForFunction(
                 () => {
                   const content = document.body.innerText;
                   return content.length > 1000 && 
-                         (content.includes('Section') || content.includes('Row') || content.includes('Quantity'));
+                         (content.includes('Section') || content.includes('Row') || 
+                          content.includes('Quantity') || content.includes('Price'));
                 },
                 { timeout: 15000, polling: 100 }
               );
-
-              console.log('VividSeats content loaded');
+              console.log('Event page content loaded');
             } catch (error) {
-              console.log('Error waiting for VividSeats content:', error);
+              console.log('Error waiting for ticket content:', error);
             }
           }
 
-          // Simple wait for content to load
+          // Wait for content to load
           await page.waitForFunction(
             () => document.body && document.body.innerText.length > 500,
             { timeout: 10000, polling: 100 }
           );
 
-          // Get page content
           const content = await page.evaluate(() => ({
             text: document.body.innerText,
             html: document.documentElement.outerHTML,
@@ -144,7 +141,6 @@ class CrawlerService {
           if (content.contentLength > 500) {
             console.log('Page loaded successfully');
             
-            // Parse content with Claude based on URL type
             const isSearchPage = content.url.includes('search');
             const source = url.includes('stubhub') ? 'stubhub' : 'vividseats';
             
@@ -162,9 +158,11 @@ class CrawlerService {
               await this.processEventData(parsedContent, source);
             } 
             // Process tickets if this was an event page
-            else if (!isSearchPage && parsedContent?.tickets) {
-              const eventId = options.eventId; // Pass this from processEventData
-              await this.processTicketData(parsedContent.tickets, eventId, source);
+            else if (!isSearchPage && options.eventId) {
+              // Ensure we have a tickets array, even if empty
+              const tickets = parsedContent?.tickets || [];
+              console.log(`Found ${tickets.length} tickets to process`);
+              await this.processTicketData(tickets, options.eventId, source);
             }
 
             return {
@@ -319,33 +317,48 @@ class CrawlerService {
   }
 
   async processTicketData(tickets, eventId, source) {
-    this.sendStatus(`Processing ${tickets?.length || 0} tickets for ${source}`);
-
-    // Early return if no tickets or eventId
-    if (!tickets || !Array.isArray(tickets) || tickets.length === 0) {
-      console.log(`No valid tickets array found for ${source} event ${eventId}`);
-      return;
-    }
-
-    if (!eventId) {
-      console.error('No eventId provided for ticket processing');
-      return;
-    }
-
     try {
-      const ticketData = tickets.map(ticket => ({
+      if (!eventId) {
+        console.error('No eventId provided for ticket processing');
+        return;
+      }
+
+      // Ensure tickets is an array
+      let ticketArray = Array.isArray(tickets) ? tickets : [];
+      if (!Array.isArray(tickets) && tickets?.tickets) {
+        ticketArray = tickets.tickets;
+      }
+
+      // Filter out invalid tickets
+      ticketArray = ticketArray.filter(ticket => 
+        ticket && 
+        (ticket.price || ticket.price === 0) && 
+        ticket.section
+      );
+
+      if (ticketArray.length === 0) {
+        console.log(`No valid tickets found for ${source} event ${eventId}`);
+        return;
+      }
+
+      this.sendStatus(`Processing ${ticketArray.length} tickets for ${source}`);
+
+      // Map tickets to database format
+      const ticketData = ticketArray.map(ticket => ({
         event_id: eventId,
         section: ticket.section || 'General',
         row: ticket.row || null,
-        price: typeof ticket.price === 'number' ? ticket.price : parseFloat(String(ticket.price).replace(/[^0-9.]/g, '')) || 0,
-        quantity: typeof ticket.quantity === 'number' ? ticket.quantity : parseInt(String(ticket.quantity)) || 1,
+        price: typeof ticket.price === 'number' 
+          ? ticket.price 
+          : parseFloat(String(ticket.price || '0').replace(/[^0-9.]/g, '')) || 0,
+        quantity: typeof ticket.quantity === 'number' 
+          ? ticket.quantity 
+          : parseInt(String(ticket.quantity || '1')) || 1,
         source: source,
         listing_id: ticket.listing_id || `${source}-${Date.now()}-${Math.random()}`,
         date_posted: new Date().toISOString(),
         sold: false
       }));
-
-      console.log(`Prepared ${ticketData.length} tickets for saving. First ticket:`, ticketData[0]);
 
       const { data, error } = await this.supabase
         .from('tickets')
@@ -355,15 +368,15 @@ class CrawlerService {
         });
 
       if (error) {
-        console.error('Error saving tickets:', error);
-      } else {
-        console.log(`Successfully saved ${data.length} tickets for ${source} event ${eventId}`);
+        throw error;
       }
+
+      console.log(`Successfully saved ${data.length} tickets for ${source} event ${eventId}`);
+      this.sendStatus(`Saved ${data.length} tickets for ${source}`);
+
     } catch (error) {
-      console.error(`Failed to process tickets for ${source}:`, error, {
-        eventId,
-        ticketCount: tickets?.length
-      });
+      console.error(`Failed to process tickets for ${source}:`, error);
+      this.sendStatus(`Error processing tickets for ${source}`);
     }
   }
 }

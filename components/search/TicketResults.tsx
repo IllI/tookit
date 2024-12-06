@@ -1,5 +1,4 @@
-import { SearchResult, Event, Ticket, TicketSource } from '@/lib/types/api';
-import { formatDistanceToNow } from 'date-fns';
+import { SearchResult } from '@/lib/types/api';
 
 interface TicketResultsProps {
   results: SearchResult;
@@ -8,161 +7,77 @@ interface TicketResultsProps {
 }
 
 export default function TicketResults({ results, isLoading, lastUpdated }: TicketResultsProps) {
-  if (!results.data || results.data.length === 0) {
-    return <div className="mt-8">No tickets found</div>;
+  const formatDate = (dateString: string) => {
+    try {
+      const date = new Date(dateString);
+      return date.toLocaleDateString('en-US', {
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+        hour: 'numeric',
+        minute: 'numeric'
+      });
+    } catch (e) {
+      return 'Date TBD';
+    }
+  };
+
+  const formatPrice = (price: number) => {
+    try {
+      return new Intl.NumberFormat('en-US', {
+        style: 'currency',
+        currency: 'USD'
+      }).format(price);
+    } catch (e) {
+      return '$0.00';
+    }
+  };
+
+  if (!results?.data?.length) {
+    return (
+      <div className="p-4 text-center text-gray-500">
+        No tickets found
+      </div>
+    );
   }
 
-  // Function to safely format date
-  const formatDate = (dateStr?: string) => {
-    if (!dateStr) return 'Unknown time';
-    try {
-      return formatDistanceToNow(new Date(dateStr));
-    } catch (error) {
-      console.error('Error formatting date:', dateStr, error);
-      return 'Unknown time';
-    }
-  };
-
-  // Sort events by lowest ticket price
-  const sortedEvents = [...results.data].sort((a, b) => {
-    const aPrice = Math.min(...(a.tickets || []).map(t => t.price));
-    const bPrice = Math.min(...(b.tickets || []).map(t => t.price));
-    return aPrice - bPrice;
-  });
-
-  const getSourceStatus = (source?: TicketSource) => {
-    if (!source) {
-      return (
-        <span className="text-gray-500 text-xs">
-          Not available
-        </span>
-      );
-    }
-
-    if (source.error) {
-      return (
-        <span className="text-red-500 text-xs">
-          Error updating • Last updated {formatDate(source.lastUpdated)} ago
-        </span>
-      );
-    }
-
-    return source.isLive ? (
-      <span className="text-green-500 text-xs">Live prices</span>
-    ) : (
-      <span className="text-yellow-500 text-xs">
-        Cached • Last updated {formatDate(source.lastUpdated)} ago
-      </span>
-    );
-  };
-
   return (
-    <div className="mt-8">
-      <div className="flex justify-between items-center mb-4">
-        <h2 className="text-xl font-semibold">
-          Found {results.data.length} events
-        </h2>
-        <div className="text-sm space-y-1">
-          {results.metadata.sources ? (
-            <>
-              <div>
-                StubHub: {getSourceStatus(results.metadata.sources.stubhub)}
-              </div>
-              <div>
-                VividSeats: {getSourceStatus(results.metadata.sources.vividseats)}
-              </div>
-            </>
-          ) : null}
-        </div>
-      </div>
-
-      <div className="space-y-8">
-        {sortedEvents.map((event) => (
-          <div 
-            key={`${event.id}-${event.source || 'unknown'}`}
-            className="border rounded-lg p-4 shadow-sm"
-          >
-            <div className="flex justify-between items-start mb-4">
-              <div>
-                <h3 className="text-lg font-semibold">{event.name}</h3>
-                <p className="text-gray-600">{event.venue}</p>
-                <p className="text-sm text-gray-500">
-                  {new Date(event.date).toLocaleDateString()} at{' '}
-                  {new Date(event.date).toLocaleTimeString()}
-                </p>
-              </div>
-              <div className="text-right">
-                <p className="text-sm text-gray-500">Starting from</p>
-                <p className="text-xl font-bold text-green-600">
-                  ${Math.min(...(event.tickets || []).map(t => t.price))}
-                </p>
-              </div>
+    <div className="divide-y divide-gray-200">
+      {results.data.map((ticket) => (
+        <div key={ticket.id} className="p-4 hover:bg-gray-50">
+          <div className="flex justify-between items-start">
+            <div>
+              <h3 className="text-lg font-medium text-gray-900">
+                {ticket.event?.name}
+              </h3>
+              <p className="mt-1 text-sm text-gray-500">
+                {formatDate(ticket.event?.date)}
+              </p>
+              <p className="mt-1 text-sm text-gray-500">
+                {ticket.event?.venue}
+              </p>
+              <p className="mt-2 text-sm text-gray-500">
+                Section {ticket.section} {ticket.row ? `Row ${ticket.row}` : ''}
+              </p>
             </div>
-
-            <div className="grid gap-2">
-              {event.tickets?.map((ticket) => (
-                <div 
-                  key={`${ticket.id || ticket.listingId}-${ticket.source}-${ticket.section}-${ticket.price}`}
-                  className={`flex justify-between items-center p-2 rounded transition-colors ${
-                    ticket.source === 'stubhub' 
-                      ? 'bg-blue-50 hover:bg-blue-100' 
-                      : 'bg-purple-50 hover:bg-purple-100'
-                  }`}
-                >
-                  <div>
-                    <p className="text-sm text-gray-600">
-                      {ticket.section} • {ticket.quantity} tickets
-                      {ticket.row ? ` • Row ${ticket.row}` : ''}
-                      {ticket.dealScore ? ` • Deal Score: ${ticket.dealScore}` : ''}
-                    </p>
-                    {results.metadata.sources?.[ticket.source] && 
-                     !results.metadata.sources[ticket.source]?.isLive && (
-                      <p className="text-xs text-yellow-600">
-                        Price from {formatDate(results.metadata.sources[ticket.source]?.lastUpdated)} ago
-                      </p>
-                    )}
-                  </div>
-                  <div className="text-right">
-                    <a
-                      href={ticket.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-block"
-                    >
-                      <p className="font-semibold text-blue-600 hover:text-blue-800">
-                        ${ticket.price}
-                      </p>
-                      <p className="text-xs text-gray-500">
-                        Buy on {ticket.source}
-                      </p>
-                    </a>
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            <div className="mt-4 flex gap-2">
-              {event.links?.map((link) => (
-                <a
-                  key={link.id}
-                  href={link.url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-sm text-blue-600 hover:underline"
-                >
-                  View on {link.source}
-                </a>
-              ))}
+            <div className="text-right">
+              <p className="text-lg font-medium text-gray-900">
+                {formatPrice(ticket.price)}
+              </p>
+              <p className="mt-1 text-sm text-gray-500">
+                {ticket.quantity} available
+              </p>
+              <p className="mt-1 text-xs text-gray-400">
+                via {ticket.source}
+              </p>
             </div>
           </div>
-        ))}
-      </div>
-
-      {isLoading && (
-        <div className="mt-4 text-center text-sm text-gray-500">
-          Refreshing results...
         </div>
-      )}
+      ))}
+      <div className="p-4 text-sm text-gray-500 text-right">
+        Last updated: {lastUpdated.toLocaleTimeString()}
+      </div>
     </div>
   );
 } 
