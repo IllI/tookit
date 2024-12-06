@@ -1,144 +1,109 @@
-import { createClient } from '@supabase/supabase-js';
+import { EventEmitter } from 'events';
 import StubHubSearcher from '@/src/stub-hub';
 import VividSeatsSearcher from '@/src/vivid-seats';
+import type { SearchParams } from '@/lib/types/api';
+import { crawlerService } from '@/src/services/crawler-service';
 
-interface SearchParams {
-  keyword: string;
-  location: string;
-  source?: string;
-}
-
-interface ParsedEvent {
-  name: string;
-  date: string;
-  venue: string;
-  location: string;
-  price?: string;
-}
-
-interface ParsedEvents {
-  events: ParsedEvent[];
-}
-
-interface SearchResult {
-  name: string;
-  tickets: number;
-  sections: Array<{
-    section: string;
-    ticketCount?: number;
-  }>;
-}
-
-export class SearchService {
-  private supabase;
-  private stubHubSearcher;
-  private vividSeatsSearcher;
-
+export class SearchService extends EventEmitter {
   constructor() {
-    this.supabase = createClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-    );
-    this.stubHubSearcher = new StubHubSearcher();
-    this.vividSeatsSearcher = new VividSeatsSearcher();
+    super();
+    crawlerService.setSearchService(this);
   }
 
-  async searchAll(params: SearchParams): Promise<SearchResult[]> {
-    console.log('[INFO] Starting search with params:', params);
-    
-    // Run searches concurrently
-    const [vividSeatsResults, stubHubResults] = await Promise.all([
-      this.searchVividSeats(params).catch(error => {
-        console.error('VividSeats search failed:', error);
-        return [];
-      }),
-      this.searchStubHub(params).catch(error => {
-        console.error('StubHub search failed:', error);
-        return [];
-      })
-    ]);
-
-    // Save results to DB
-    await Promise.all([
-      this.saveEvents(vividSeatsResults, 'vividseats'),
-      this.saveEvents(stubHubResults, 'stubhub')
-    ]);
-
-    return [...vividSeatsResults, ...stubHubResults];
-  }
-
-  private async saveEvents(events: SearchResult[], source: string) {
-    if (!events.length) {
-      console.log(`No events to save for ${source}`);
-      return;
-    }
+  async searchAll(params: SearchParams) {
+    this.emit('status', 'Initializing search...');
 
     try {
-      const { data, error } = await this.supabase
-        .from('events')
-        .upsert(
-          events.map(event => ({
-            name: event.name,
-            source,
-            tickets: event.tickets,
-            sections: event.sections,
-            created_at: new Date().toISOString()
-          })),
-          { onConflict: 'name,source' }
-        );
+      // Initialize crawler first
+      this.emit('status', 'Setting up browser...');
+      await crawlerService.initialize();
 
-      if (error) throw error;
-      console.log(`[INFO] Saved ${events.length} events from ${source}`);
+      // Run searches in parallel
+      this.emit('status', 'Starting searches...');
+      const [vividSeatsEvents, stubHubEvents] = await Promise.all([
+        this.searchVividSeats(params).catch(error => {
+          console.error('VividSeats search failed:', error);
+          this.emit('status', 'VividSeats search failed');
+          return [];
+        }),
+        this.searchStubHub(params).catch(error => {
+          console.error('StubHub search failed:', error);
+          this.emit('status', 'StubHub search failed');
+          return [];
+        })
+      ]);
+
+      const allEvents = [...vividSeatsEvents, ...stubHubEvents];
+      
+      if (allEvents.length > 0) {
+        this.emit('status', `Processing ${allEvents.length} events...`);
+        
+        // Process events and get tickets
+        for (const event of allEvents) {
+          this.emit('status', `Processing event: ${event.name}`);
+          if (event.eventUrl) {
+            this.emit('status', `Fetching tickets for ${event.name}...`);
+            // Emit tickets as they're found
+            this.emit('tickets', [event]);
+          }
+        }
+
+        return {
+          success: true,
+          data: allEvents,
+          metadata: { totalEvents: allEvents.length }
+        };
+      }
+
+      this.emit('status', 'No events found');
+      return {
+        success: true,
+        data: [],
+        metadata: { totalEvents: 0 }
+      };
+
     } catch (error) {
-      console.error(`Error saving ${source} events:`, error);
+      this.emit('error', error instanceof Error ? error.message : 'Search failed');
+      throw error;
+    } finally {
+      // Cleanup
+      await crawlerService.cleanup();
     }
   }
 
-  async searchStubHub(params: SearchParams): Promise<SearchResult[]> {
-    const result = await this.stubHubSearcher.searchConcerts(
+  private async searchStubHub(params: SearchParams) {
+    this.emit('status', 'Searching StubHub...');
+    const stubHubSearcher = new StubHubSearcher();
+    const events = await stubHubSearcher.searchConcerts(
       params.keyword,
       undefined,
       params.location
-    ) as ParsedEvents;
-
-    if (!result?.events?.length) {
-      console.log('No events found on StubHub');
-      return [];
+    );
+    
+    if (events.length) {
+      this.emit('status', `Found ${events.length} events on StubHub`);
+    } else {
+      this.emit('status', 'No events found on StubHub');
     }
-
-    console.log(`[INFO] Successfully processed ${result.events.length} StubHub events`);
-
-    return result.events.map((event: ParsedEvent) => ({
-      name: event.name,
-      tickets: 1,
-      sections: [{
-        section: event.venue,
-        ticketCount: 1
-      }]
-    }));
+    
+    return events;
   }
 
-  async searchVividSeats(params: SearchParams): Promise<SearchResult[]> {
-    const result = await this.vividSeatsSearcher.searchConcerts(
+  private async searchVividSeats(params: SearchParams) {
+    this.emit('status', 'Searching VividSeats...');
+    const vividSeatsSearcher = new VividSeatsSearcher();
+    const events = await vividSeatsSearcher.searchConcerts(
       params.keyword,
       undefined,
       params.location
-    ) as ParsedEvents;
-
-    if (!result?.events?.length) {
-      console.log('No events found on VividSeats');
-      return [];
+    );
+    
+    if (events.length) {
+      this.emit('status', `Found ${events.length} events on VividSeats`);
+    } else {
+      this.emit('status', 'No events found on VividSeats');
     }
-
-    console.log(`[INFO] Successfully processed ${result.events.length} VividSeats events`);
-
-    return result.events.map((event: ParsedEvent) => ({
-      name: event.name,
-      tickets: 1,
-      sections: [{
-        section: event.venue,
-        ticketCount: 1
-      }]
-    }));
+    
+    return events;
   }
 } 

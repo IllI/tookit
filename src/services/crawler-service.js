@@ -17,20 +17,37 @@ class CrawlerService {
       process.env.NEXT_PUBLIC_SUPABASE_URL,
       process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
     );
+    this.searchService = null;
+  }
+
+  setSearchService(service) {
+    this.searchService = service;
+  }
+
+  sendStatus(message) {
+    if (this.searchService) {
+      this.searchService.emit('status', message);
+    }
+    console.log(message);
   }
 
   async initialize() {
     if (!this.browser) {
-      this.browser = await puppeteer.launch({
-        headless: false,
+      const launchOptions = {
+        headless: 'new',
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-accelerated-2d-canvas',
+          '--disable-gpu',
           '--window-size=1920,1080',
           '--disable-blink-features=AutomationControlled'
         ],
         ignoreDefaultArgs: ['--enable-automation']
-      });
+      };
+
+      this.browser = await puppeteer.launch(launchOptions);
       console.log('Browser initialized');
     }
     return { browser: this.browser };
@@ -52,15 +69,27 @@ class CrawlerService {
       context = await browser.createIncognitoBrowserContext();
       page = await context.newPage();
       
-      // Universal stealth setup
+      // Enhanced stealth setup
       await page.setViewport({ width: 1920, height: 1080 });
       await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
+      
+      // Additional headers and webdriver settings
       await page.setExtraHTTPHeaders({
         'Accept-Language': 'en-US,en;q=0.9',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
         'sec-ch-ua': '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
         'sec-ch-ua-mobile': '?0',
         'sec-ch-ua-platform': '"Windows"'
+      });
+
+      // Override navigator.webdriver
+      await page.evaluateOnNewDocument(() => {
+        Object.defineProperty(navigator, 'webdriver', {
+          get: () => undefined
+        });
+        window.navigator.chrome = {
+          runtime: {}
+        };
       });
 
       while (attempt <= this.maxAttempts) {
@@ -173,12 +202,13 @@ class CrawlerService {
 
   async processEventData(parsedEvents, source) {
     if (!parsedEvents?.events?.length) {
-      console.log(`No events found for ${source}`);
+      this.sendStatus(`No events found for ${source}`);
       return;
     }
 
     for (const event of parsedEvents.events) {
       try {
+        this.sendStatus(`Processing event: ${event.name}`);
         // Skip parking and auxiliary events
         if (event.name.toLowerCase().includes('parking')) {
           console.log('Skipping parking event:', event.name);
@@ -273,25 +303,23 @@ class CrawlerService {
 
         // Visit event page to scrape tickets
         if (event.eventUrl) {
-          console.log(`Visiting event page: ${event.eventUrl}`);
+          this.sendStatus(`Fetching tickets for ${event.name}...`);
           const eventPageContent = await this.crawlPage({
             url: event.eventUrl,
             eventId // Pass eventId for ticket processing
           });
+          this.sendStatus(`Finished processing tickets for ${event.name}`);
         }
 
       } catch (error) {
         console.error('Error processing event:', error);
+        this.sendStatus(`Error processing event: ${event.name}`);
       }
     }
   }
 
   async processTicketData(tickets, eventId, source) {
-    console.log(`Processing tickets for ${source}:`, {
-      eventId,
-      ticketsFound: tickets?.length || 0,
-      firstTicket: tickets?.[0]
-    });
+    this.sendStatus(`Processing ${tickets?.length || 0} tickets for ${source}`);
 
     // Early return if no tickets or eventId
     if (!tickets || !Array.isArray(tickets) || tickets.length === 0) {

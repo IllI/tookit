@@ -7,17 +7,22 @@ export default function Home() {
   const [searchResults, setSearchResults] = useState<SearchResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [searchStatus, setSearchStatus] = useState<string>('');
   const [lastUpdated, setLastUpdated] = useState(new Date());
 
   const handleSearch = async (params: SearchParams) => {
     setLoading(true);
     setError(null);
+    setSearchStatus('Starting search...');
+    setSearchResults(null);
 
     try {
-      const response = await fetch('/api/events/search', {
+      // Make a single POST request with SSE
+      const response = await fetch('/api/search', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          'Accept': 'text/event-stream',
         },
         body: JSON.stringify(params),
       });
@@ -26,13 +31,63 @@ export default function Home() {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
 
-      const data = await response.json();
-      setSearchResults(data);
-      setLastUpdated(new Date());
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error('No response body');
+
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.slice(5));
+              console.log('SSE update received:', data);
+
+              switch (data.type) {
+                case 'status':
+                  setSearchStatus(data.message);
+                  break;
+                
+                case 'tickets':
+                  setSearchResults(prev => ({
+                    success: true,
+                    data: prev?.data ? [...prev.data, ...data.tickets] : data.tickets,
+                    metadata: prev?.metadata || {}
+                  }));
+                  setLastUpdated(new Date());
+                  break;
+                
+                case 'error':
+                  setError(data.error);
+                  setLoading(false);
+                  break;
+                
+                case 'complete':
+                  setSearchResults({
+                    success: true,
+                    data: data.tickets,
+                    metadata: data.metadata
+                  });
+                  setLoading(false);
+                  break;
+              }
+            } catch (e) {
+              console.error('Error parsing SSE message:', e);
+            }
+          }
+        }
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An error occurred');
       console.error('Search error:', err);
-    } finally {
       setLoading(false);
     }
   };
@@ -46,13 +101,13 @@ export default function Home() {
           </h1>
 
           <div className="bg-white rounded-lg shadow p-6 mb-8">
-            <SearchForm onSearch={handleSearch} />
+            <SearchForm onSearch={handleSearch} isSearching={loading} />
           </div>
 
           {loading && (
             <div className="flex justify-center items-center py-8">
               <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
-              <p className="ml-2 text-gray-600">Searching tickets...</p>
+              <p className="ml-2 text-gray-600">{searchStatus}</p>
             </div>
           )}
 
