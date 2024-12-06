@@ -34,6 +34,35 @@ export default function TicketResults({ results, isLoading, lastUpdated }: Ticke
     }
   };
 
+  const getTicketUrl = (ticket: any) => {
+    // Get the event URL from the event object
+    const eventUrl = ticket.event?.url;
+    if (!eventUrl) {
+      console.warn('No event URL found for ticket:', ticket);
+      return '#';
+    }
+
+    try {
+      const url = new URL(eventUrl);
+      
+      // Add source-specific parameters
+      if (ticket.source === 'stubhub') {
+        url.searchParams.set('quantity', String(ticket.quantity || 1));
+        if (ticket.section) url.searchParams.set('section', ticket.section);
+        if (ticket.row) url.searchParams.set('row', ticket.row);
+      } else if (ticket.source === 'vividseats') {
+        url.searchParams.set('quantity', String(ticket.quantity || 1));
+        if (ticket.section) url.searchParams.set('section', ticket.section);
+        if (ticket.row) url.searchParams.set('row', ticket.row);
+      }
+
+      return url.toString();
+    } catch (e) {
+      console.error('Invalid event URL:', eventUrl);
+      return '#';
+    }
+  };
+
   if (!results?.data?.length) {
     return (
       <div className="p-4 text-center text-gray-500">
@@ -45,7 +74,13 @@ export default function TicketResults({ results, isLoading, lastUpdated }: Ticke
   return (
     <div className="divide-y divide-gray-200">
       {results.data.map((ticket) => (
-        <div key={ticket.id} className="p-4 hover:bg-gray-50">
+        <a
+          key={ticket.id}
+          href={getTicketUrl(ticket)}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="block p-4 hover:bg-gray-50 transition duration-150 ease-in-out"
+        >
           <div className="flex justify-between items-start">
             <div>
               <h3 className="text-lg font-medium text-gray-900">
@@ -73,7 +108,10 @@ export default function TicketResults({ results, isLoading, lastUpdated }: Ticke
               </p>
             </div>
           </div>
-        </div>
+          <div className="mt-2 text-sm text-blue-600">
+            View Tickets →
+          </div>
+        </a>
       ))}
       <div className="p-4 text-sm text-gray-500 text-right">
         Last updated: {lastUpdated.toLocaleTimeString()}

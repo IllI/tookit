@@ -54,10 +54,15 @@ export class SearchService extends EventEmitter {
           quantity,
           source,
           listing_id,
-          event:events(
+          event:events!inner(
+            id,
             name,
             date,
-            venue
+            venue,
+            event_links!inner(
+              source,
+              url
+            )
           )
         `)
         .order('price');
@@ -67,14 +72,22 @@ export class SearchService extends EventEmitter {
       }
 
       // Format ticket data
-      const formattedTickets = tickets?.map(ticket => ({
-        ...ticket,
-        price: parseFloat(ticket.price) || 0,
-        event: ticket.event ? {
-          ...ticket.event,
-          date: ticket.event.date ? new Date(ticket.event.date).toLocaleString() : 'Date TBD'
-        } : null
-      })) || [];
+      const formattedTickets = tickets?.map(ticket => {
+        // Find the matching event link for the ticket's source
+        const eventLink = ticket.event?.event_links?.find(
+          link => link.source === ticket.source
+        );
+
+        return {
+          ...ticket,
+          price: parseFloat(ticket.price) || 0,
+          event: ticket.event ? {
+            ...ticket.event,
+            date: ticket.event.date ? new Date(ticket.event.date).toLocaleString() : 'Date TBD',
+            url: eventLink?.url // Use the correct source-specific URL
+          } : null
+        };
+      }) || [];
 
       if (formattedTickets.length > 0) {
         this.emit('status', `Found ${formattedTickets.length} total tickets`);

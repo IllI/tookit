@@ -34,7 +34,8 @@ class CrawlerService {
   async initialize() {
     if (!this.browser) {
       const launchOptions = {
-        headless: 'new',
+        //headless: 'new',
+        headless: false,
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',
@@ -110,7 +111,7 @@ class CrawlerService {
                          (content.includes('Section') || content.includes('Row') || 
                           content.includes('Quantity') || content.includes('Price'));
                 },
-                { timeout: 15000, polling: 100 }
+                { timeout: 5000, polling: 100 }
               );
               console.log('Event page content loaded');
             } catch (error) {
@@ -121,7 +122,7 @@ class CrawlerService {
           // Wait for content to load
           await page.waitForFunction(
             () => document.body && document.body.innerText.length > 500,
-            { timeout: 10000, polling: 100 }
+            { timeout: 5000, polling: 100 }
           );
 
           const content = await page.evaluate(() => ({
@@ -323,25 +324,38 @@ class CrawlerService {
         return;
       }
 
+      // Log incoming data
+      console.log('Processing tickets:', {
+        ticketsReceived: tickets?.length || 0,
+        eventId,
+        source
+      });
+
       // Ensure tickets is an array
-      let ticketArray = Array.isArray(tickets) ? tickets : [];
-      if (!Array.isArray(tickets) && tickets?.tickets) {
+      let ticketArray = [];
+      if (Array.isArray(tickets)) {
+        ticketArray = tickets;
+      } else if (tickets?.tickets && Array.isArray(tickets.tickets)) {
         ticketArray = tickets.tickets;
+      } else if (tickets) {
+        ticketArray = [tickets];
       }
 
       // Filter out invalid tickets
       ticketArray = ticketArray.filter(ticket => 
         ticket && 
-        (ticket.price || ticket.price === 0) && 
+        (typeof ticket.price !== 'undefined') && 
         ticket.section
       );
 
-      if (ticketArray.length === 0) {
+      const ticketCount = ticketArray.length;
+      console.log(`Found ${ticketCount} valid tickets for ${source}`);
+      this.sendStatus(`Processing ${ticketCount} tickets for ${source}`);
+
+      if (ticketCount === 0) {
         console.log(`No valid tickets found for ${source} event ${eventId}`);
         return;
       }
-
-      this.sendStatus(`Processing ${ticketArray.length} tickets for ${source}`);
 
       // Map tickets to database format
       const ticketData = ticketArray.map(ticket => ({
@@ -360,6 +374,7 @@ class CrawlerService {
         sold: false
       }));
 
+      // Save to database
       const { data, error } = await this.supabase
         .from('tickets')
         .upsert(ticketData, { 
@@ -368,15 +383,26 @@ class CrawlerService {
         });
 
       if (error) {
+        console.error('Database error:', error);
         throw error;
       }
 
-      console.log(`Successfully saved ${data.length} tickets for ${source} event ${eventId}`);
-      this.sendStatus(`Saved ${data.length} tickets for ${source}`);
+      // Log the actual data returned
+      console.log('Database response:', {
+        inserted: data?.length || 0,
+        attempted: ticketData.length
+      });
+
+      const savedCount = data?.length || ticketData.length; // Use ticketData length as fallback
+      console.log(`Successfully saved ${savedCount} tickets for ${source} event ${eventId}`);
+      this.sendStatus(`Saved ${savedCount} tickets for ${source}`);
+
+      return savedCount;
 
     } catch (error) {
       console.error(`Failed to process tickets for ${source}:`, error);
       this.sendStatus(`Error processing tickets for ${source}`);
+      return 0;
     }
   }
 }
