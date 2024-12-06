@@ -22,12 +22,109 @@ export class SearchService extends EventEmitter {
     this.emit('status', 'Initializing search...');
 
     try {
-      // Initialize crawler first
+      // First, check for existing events
+      this.emit('status', 'Checking for existing events...');
+      const { data: existingEvents } = await this.supabase
+        .from('events')
+        .select(`
+          id,
+          name,
+          date,
+          venue,
+          event_links!inner(
+            source,
+            url
+          )
+        `)
+        .ilike('name', `%${params.keyword}%`)
+        .gte('date', new Date().toISOString());
+
+      // If we found existing events, update their tickets and return
+      if (existingEvents?.length) {
+        this.emit('status', `Found ${existingEvents.length} existing events. Updating tickets...`);
+        
+        // Initialize crawler for updating existing events
+        await crawlerService.initialize();
+        
+        try {
+          for (const event of existingEvents) {
+            for (const link of event.event_links) {
+              this.emit('status', `Updating tickets for ${event.name} from ${link.source}...`);
+              
+              // Get current tickets from source
+              await crawlerService.crawlPage({
+                url: link.url,
+                eventId: event.id
+              });
+            }
+          }
+
+          // After updating tickets, fetch all current tickets
+          const { data: tickets, error } = await this.supabase
+            .from('tickets')
+            .select(`
+              id,
+              event_id,
+              section,
+              row,
+              price,
+              quantity,
+              source,
+              listing_id,
+              event:events!inner(
+                id,
+                name,
+                date,
+                venue,
+                event_links!inner(
+                  source,
+                  url
+                )
+              )
+            `)
+            .order('price');
+
+          if (error) throw error;
+
+          // Format and return the tickets
+          const formattedTickets = tickets?.map(ticket => {
+            const eventLink = ticket.event?.event_links?.find(
+              link => link.source === ticket.source
+            );
+
+            return {
+              ...ticket,
+              price: parseFloat(ticket.price) || 0,
+              event: ticket.event ? {
+                ...ticket.event,
+                date: ticket.event.date ? new Date(ticket.event.date).toLocaleString() : 'Date TBD',
+                url: eventLink?.url
+              } : null
+            };
+          }) || [];
+
+          this.emit('status', `Found ${formattedTickets.length} total tickets`);
+          this.emit('tickets', formattedTickets);
+          
+          return {
+            success: true,
+            data: formattedTickets,
+            metadata: { totalTickets: formattedTickets.length }
+          };
+        } finally {
+          await crawlerService.cleanup();
+        }
+      }
+
+      // If no existing events found, proceed with new search
+      this.emit('status', 'No existing events found. Starting new search...');
+      
+      // Initialize crawler for new searches
       this.emit('status', 'Setting up browser...');
       await crawlerService.initialize();
 
-      // Run searches in parallel
-      this.emit('status', 'Starting searches...');
+      // Run new searches in parallel
+      this.emit('status', 'Searching for new events...');
       await Promise.all([
         this.searchVividSeats(params).catch(error => {
           console.error('VividSeats search failed:', error);
@@ -41,8 +138,8 @@ export class SearchService extends EventEmitter {
         })
       ]);
 
-      // After searches complete, fetch all tickets from database
-      this.emit('status', 'Fetching tickets...');
+      // After all searches complete, fetch all tickets from database
+      this.emit('status', 'Fetching final ticket list...');
       const { data: tickets, error } = await this.supabase
         .from('tickets')
         .select(`
@@ -84,7 +181,7 @@ export class SearchService extends EventEmitter {
           event: ticket.event ? {
             ...ticket.event,
             date: ticket.event.date ? new Date(ticket.event.date).toLocaleString() : 'Date TBD',
-            url: eventLink?.url // Use the correct source-specific URL
+            url: eventLink?.url
           } : null
         };
       }) || [];
