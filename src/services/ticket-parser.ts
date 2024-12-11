@@ -58,11 +58,11 @@ export class TicketParser {
     // Extract components based on source-specific patterns
     let match;
     if (source === 'stubhub') {
-      // StubHub format: "21 Mar 2025 Fri 8:00 PM"
-      match = cleaned.match(/(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{4})(?:\s*(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun))?\s*(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+      // StubHub format: "Mar 21 2025 Fri 8:00 PM"
+      match = cleaned.match(/(\w{3})\s+(\d{1,2})\s+(\d{4})\s*(?:\w{3})?\s*(\d{1,2}):(\d{2})\s*(AM|PM)/i);
     } else {
       // VividSeats format: "FriMar 2120257:00pm"
-      match = cleaned.match(/(?:(Mon|Tue|Wed|Thu|Fri|Sat|Sun))?(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s*(\d{1,2})\s*(\d{4})\s*(\d{1,2}):(\d{2})\s*(AM|PM)?/i);
+      match = cleaned.match(/(?:(\w{3}))?\s*(\w{3})\s*(\d{1,2})\s*(\d{4})\s*(\d{1,2}):(\d{2})\s*(AM|PM)/i);
     }
 
     if (!match) {
@@ -71,12 +71,14 @@ export class TicketParser {
     }
 
     try {
-      let day, month, year, hours, minutes, ampm;
+      let month, day, year, hours, minutes, ampm;
       
       if (source === 'stubhub') {
-        [, day, month, year, hours, minutes, ampm] = match;
-      } else {
         [, month, day, year, hours, minutes, ampm] = match;
+      } else {
+        // VividSeats - ignore weekday if present
+        const startIdx = match[1] ? 2 : 1; // Skip weekday if present
+        [, , month, day, year, hours, minutes, ampm] = match;
       }
 
       // Convert month name to number
@@ -107,7 +109,7 @@ export class TicketParser {
       console.log('Standardized date:', {
         input: dateStr,
         cleaned,
-        components: { day, month, year, hours, minutes, ampm },
+        components: { month, day, year, hours, minutes, ampm },
         output: date.toISOString()
       });
 
@@ -120,8 +122,10 @@ export class TicketParser {
   }
 
   parseSearchResults(): ParsedResponse {
-    // Only use direct DOM parsing for StubHub
-    return this.parseStubHubSearch();
+    // Use source-specific parser
+    return this.source === 'stubhub' 
+      ? this.parseStubHubSearch()
+      : this.parseVividSeatsSearch();
   }
 
   private parseStubHubSearch(): ParsedResponse {
