@@ -179,7 +179,7 @@ class CrawlerService {
       try {
         console.log('Processing event:', JSON.stringify(event));
         this.sendStatus(`Processing event: ${event}`);
-        // Skip parking and auxiliary events
+        
         if (event.name.toLowerCase().includes('parking')) {
           console.log('Skipping parking event:', event.name);
           continue;
@@ -191,21 +191,35 @@ class CrawlerService {
           continue;
         }
 
-        // Check for existing event
-        const { data: existingEvent } = await this.supabase
+        // Check for existing event with fuzzy name matching
+        const { data: existingEvents } = await this.supabase
           .from('events')
-          .select('id')
-          .eq('name', event.name)
-          .eq('date', date.toISOString())
+          .select('id, name, date, venue')
           .eq('venue', event.venue)
-          .single();
+          .eq('city', event.city)
+          .eq('state', event.state);
 
-        let eventId;
+        let eventId = null;
 
-        if (existingEvent) {
-          console.log('Found existing event:', event.name);
-          eventId = existingEvent.id;
+        // Find matching event considering similar names and close dates
+        if (existingEvents?.length) {
+          const matchingEvent = existingEvents.find(existing => {
+            const existingDate = new Date(existing.date);
+            const timeDiff = Math.abs(existingDate.getTime() - date.getTime());
+            const hoursDiff = timeDiff / (1000 * 60 * 60);
+            
+            // Consider events within 24 hours and with similar names as the same event
+            const namesSimilar = this.areNamesSimilar(existing.name, event.name);
+            return hoursDiff <= 24 && namesSimilar;
+          });
 
+          if (matchingEvent) {
+            eventId = matchingEvent.id;
+            console.log('Found matching event:', matchingEvent.name);
+          }
+        }
+
+        if (eventId) {
           // Check for existing event link
           const { data: existingLink } = await this.supabase
             .from('event_links')
@@ -214,22 +228,7 @@ class CrawlerService {
             .eq('source', source)
             .single();
 
-          if (existingLink) {
-            if (existingLink.url === event.eventUrl) {
-              console.log(`Event link for ${source} already exists and matches`);
-            } else {
-              console.log(`Updating ${source} link for event`);
-              await this.supabase
-                .from('event_links')
-                .upsert({
-                  event_id: eventId,
-                  source,
-                  url: event.eventUrl
-                }, {
-                  onConflict: 'event_id,source'
-                });
-            }
-          } else {
+          if (!existingLink) {
             console.log(`Adding new ${source} link for existing event`);
             await this.supabase
               .from('event_links')
@@ -238,6 +237,15 @@ class CrawlerService {
                 source,
                 url: event.eventUrl
               });
+          } else if (existingLink.url !== event.eventUrl) {
+            console.log(`Updating ${source} link for event`);
+            await this.supabase
+              .from('event_links')
+              .update({ url: event.eventUrl })
+              .eq('event_id', eventId)
+              .eq('source', source);
+          } else {
+            console.log(`Event link for ${source} already exists and matches`);
           }
         } else {
           // Create new event
@@ -247,7 +255,12 @@ class CrawlerService {
               name: event.name,
               date,
               venue: event.venue,
-              category: 'Concert'
+              city: event.city,
+              state: event.state,
+              country: event.country,
+              location: event.location,
+              source: event.source,
+              source_url: event.source_url
             }])
             .select()
             .single();
@@ -286,6 +299,22 @@ class CrawlerService {
         this.sendStatus(`Error processing event: ${event.name}`);
       }
     }
+  }
+
+  // Helper function to compare event names
+  areNamesSimilar(name1, name2) {
+    const clean1 = name1.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const clean2 = name2.toLowerCase().replace(/[^a-z0-9]/g, '');
+    
+    // Check for exact match after cleaning
+    if (clean1 === clean2) return true;
+    
+    // Check if one name contains the other
+    if (clean1.includes(clean2) || clean2.includes(clean1)) return true;
+    
+    // Could add more sophisticated comparison if needed
+    
+    return false;
   }
 
   async processTicketData(tickets, eventId, source) {

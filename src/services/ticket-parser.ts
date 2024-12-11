@@ -244,6 +244,7 @@ export class TicketParser {
         // Get link from the direct child <a> element
         const link = listing.querySelector('a');
         const href = link?.getAttribute('href') || '';
+        const fullUrl = href.startsWith('http') ? href : `https://www.vividseats.com${href}`;
         
         // Get date from date-time element
         const dateElement = listing.querySelector('[data-testid="date-time-left-element"]');
@@ -288,8 +289,8 @@ export class TicketParser {
             country: 'USA',
             location: `${city}, ${stateCode}`,
             source: 'vividseats',
-            source_url: href,
-            eventUrl: href
+            source_url: fullUrl,
+            eventUrl: fullUrl
           });
         }
       } catch (error) {
