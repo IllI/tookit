@@ -146,16 +146,32 @@ export class TicketParser {
         const link = container.querySelector('a[href*="/event/"]');
         const href = link?.getAttribute('href')?.split('?')[0];
 
-        // Get name - it's in a span with text content
-        const nameSpan = container.querySelector('span[class*="t60ws5"]');
+        // Get all spans in the container and filter for content
+        const allSpans = Array.from(container.querySelectorAll('span'));
+        
+        // Name is in the span that's a direct child of the link
+        const nameSpan = link?.querySelector('span');
         const name = nameSpan?.textContent?.trim();
 
-        // Get venue - it's in the second span with similar class
-        const spans = container.querySelectorAll('span[class*="t60ws5"]');
-        const venue = spans[1]?.textContent?.trim();
+        // Get venue and location from spans that follow a specific pattern
+        const infoSpans = allSpans.filter(span => {
+          const text = span.textContent?.trim() || '';
+          // Exclude spans with generic text
+          return text && 
+                 !text.includes('See tickets') &&
+                 !text.includes('Favorite') &&
+                 !text.includes('Sort by') &&
+                 !text.includes('selling fast') &&
+                 !text.includes('This week') &&
+                 !text.includes('Today') &&
+                 !text.includes('Tomorrow');
+        });
 
-        // Get location - it's in the last span with that class, containing ", IL" or similar state code
-        const locationSpan = Array.from(spans).find(span => 
+        // Venue is typically the second meaningful span
+        const venue = infoSpans[1]?.textContent?.trim();
+
+        // Location is the span containing "City, ST" format
+        const locationSpan = infoSpans.find(span => 
           span.textContent?.match(/[A-Za-z\s]+,\s*[A-Z]{2}(?:,\s*USA)?$/)
         );
         const locationText = locationSpan?.textContent?.trim() || '';
@@ -215,46 +231,52 @@ export class TicketParser {
     const document = this.dom.window.document;
     const events: EventData[] = [];
 
-    // Find event listings using data-testid attribute as it's more reliable
-    const eventItems = document.querySelectorAll('[data-testid^="production-listing-"]');
-    console.log(`Found ${eventItems.length} VividSeats event items`);
+    // Find event listings using data-testid attribute
+    const eventListings = document.querySelectorAll('div[data-testid^="production-listing-"]');
+    console.log(`Found ${eventListings.length} VividSeats event items`);
 
-    eventItems.forEach(item => {
+    eventListings.forEach(listing => {
       try {
-        // Get link - VividSeats uses specific URL pattern
-        const link = item.querySelector('a');
+        // Get link from the direct child <a> element
+        const link = listing.querySelector('a');
         const href = link?.getAttribute('href') || '';
         
-        // Validate URL format
-        if (!href.includes('/production/') || !href.includes('-tickets-')) {
-          console.log('Invalid VividSeats URL format:', href);
-          return;
-        }
-
-        // Get date using data-testid
-        const dateElement = item.querySelector('[data-testid="date-time-left-element"]');
+        // Get date from date-time element
+        const dateElement = listing.querySelector('[data-testid="date-time-left-element"]');
         const dateText = dateElement?.textContent?.replace(/🔥.*?left/g, '').trim() || '';
 
-        // Get title and venue from subtitle section
-        const subtitleDiv = item.querySelector('[data-testid="subtitle"]');
+        // Get subtitle section that contains venue and location
+        const subtitleDiv = listing.querySelector('[data-testid="subtitle"]');
         const spans = Array.from(subtitleDiv?.querySelectorAll('span') || []);
         
-        // Get clean title from URL
-        const urlMatch = href.match(/\/(.*?)-tickets-/);
-        const titleFromUrl = urlMatch ? 
-          urlMatch[1].replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase()) : '';
-
-        // Get venue and location from spans
+        // First span in subtitle is venue
         const venue = spans[0]?.textContent?.replace(/•/g, '').trim() || '';
+        
+        // Last span in subtitle is location
         const locationText = spans[spans.length - 1]?.textContent?.replace(/•/g, '').trim() || '';
         
         // Parse city and state from location
         const [city, state] = locationText.split(',').map(s => s.trim());
         const stateCode = state?.replace(/, USA$/, '');
 
-        if (titleFromUrl && dateText && venue && city && stateCode && href) {
+        // Get name from URL pattern
+        const urlMatch = href.match(/\/([^/]+)-tickets/);
+        const name = urlMatch ? 
+          urlMatch[1].replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase()) : '';
+
+        console.log('VividSeats extracted data:', {
+          url: href,
+          name,
+          date: dateText,
+          venue,
+          city,
+          state: stateCode,
+          location: locationText
+        });
+
+        if (name && dateText && venue && city && stateCode && href) {
           events.push({
-            name: titleFromUrl,
+            name,
             date: this.standardizeDate(dateText, 'vividseats'),
             venue,
             city,
