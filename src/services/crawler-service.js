@@ -2,6 +2,7 @@ import { createClient } from '@supabase/supabase-js';
 import puppeteer from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import { getParser } from './llm-service';
+import { TicketParser } from './ticket-parser';
 
 puppeteer.use(StealthPlugin());
 
@@ -54,19 +55,12 @@ class CrawlerService {
     return { browser: this.browser };
   }
 
-  async crawlPage(options) {
-    const url = typeof options === 'string' ? options : options?.url;
-    
-    if (!url || typeof url !== 'string') {
-      throw new Error('Invalid URL provided to crawlPage');
-    }
-
-    const { browser } = await this.initialize();
+  async crawlPage({ url, waitForSelector, searchParams }) {
     let context = null;
     let page = null;
-    let attempt = 1;
-
+    
     try {
+      const { browser } = await this.initialize();
       context = await browser.createIncognitoBrowserContext();
       page = await context.newPage();
       
@@ -93,32 +87,13 @@ class CrawlerService {
         };
       });
 
+      let attempt = 1;
       while (attempt <= this.maxAttempts) {
         try {
           console.log(`Attempt ${attempt}/${this.maxAttempts} to load: ${url}`);
           
           await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
           
-          // Add special handling for ticket pages
-          const isEventPage = !url.includes('search');
-          if (isEventPage) {
-            try {
-              await page.waitForTimeout(5000);
-              await page.waitForFunction(
-                () => {
-                  const content = document.body.innerText;
-                  return content.length > 1000 && 
-                         (content.includes('Section') || content.includes('Row') || 
-                          content.includes('Quantity') || content.includes('Price'));
-                },
-                { timeout: 5000, polling: 100 }
-              );
-              console.log('Event page content loaded');
-            } catch (error) {
-              console.log('Error waiting for ticket content:', error);
-            }
-          }
-
           // Wait for content to load
           await page.waitForFunction(
             () => document.body && document.body.innerText.length > 500,
@@ -129,41 +104,36 @@ class CrawlerService {
             text: document.body.innerText,
             html: document.documentElement.outerHTML,
             title: document.title,
-            url: window.location.href,
-            contentLength: document.body.innerText.length
+            url: window.location.href
           }));
 
           console.log('Page state:', {
             url: content.url,
             title: content.title,
-            contentLength: content.contentLength
+            contentLength: content.text.length
           });
 
-          if (content.contentLength > 500) {
+          if (content.text.length > 500) {
             console.log('Page loaded successfully');
             
             const isSearchPage = content.url.includes('search');
             const source = url.includes('stubhub') ? 'stubhub' : 'vividseats';
             
-            console.log(`Sending content to Claude for ${isSearchPage ? 'search' : 'ticket'} parsing...`);
-            
-            const parsedContent = await this.parser.parseContent(
-              content.text,
-              content.url,
-              isSearchPage ? options.searchParams : undefined,
-              !isSearchPage
-            );
+            // Use the TicketParser directly instead of Claude
+            const parser = new TicketParser(content.html, source);
+            const parsedContent = isSearchPage 
+              ? parser.parseSearchResults()
+              : parser.parseEventTickets();
 
             // Process events if this was a search page
             if (isSearchPage && parsedContent?.events) {
               await this.processEventData(parsedContent, source);
             } 
             // Process tickets if this was an event page
-            else if (!isSearchPage && options.eventId) {
-              // Ensure we have a tickets array, even if empty
+            else if (!isSearchPage && searchParams?.eventId) {
               const tickets = parsedContent?.tickets || [];
               console.log(`Found ${tickets.length} tickets to process`);
-              await this.processTicketData(tickets, options.eventId, source);
+              await this.processTicketData(tickets, searchParams.eventId, source);
             }
 
             return {
@@ -207,7 +177,8 @@ class CrawlerService {
 
     for (const event of parsedEvents.events) {
       try {
-        this.sendStatus(`Processing event: ${event.name}`);
+        console.log('Processing event:', JSON.stringify(event));
+        this.sendStatus(`Processing event: ${event}`);
         // Skip parking and auxiliary events
         if (event.name.toLowerCase().includes('parking')) {
           console.log('Skipping parking event:', event.name);
