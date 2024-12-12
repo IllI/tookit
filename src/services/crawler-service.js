@@ -55,7 +55,7 @@ class CrawlerService {
     return { browser: this.browser };
   }
 
-  async crawlPage({ url, waitForSelector, searchParams }) {
+  async crawlPage({ url, waitForSelector, eventId }) {
     let context = null;
     let page = null;
     
@@ -94,11 +94,16 @@ class CrawlerService {
           
           await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
           
-          // Wait for content to load
-          await page.waitForFunction(
-            () => document.body && document.body.innerText.length > 500,
-            { timeout: 5000, polling: 100 }
-          );
+          // Wait for ticket listings to load
+          if (url.includes('vividseats.com')) {
+            console.log('Waiting for VividSeats ticket listings...');
+            await page.waitForSelector('[data-testid="listings-container"]', { timeout: 10000 });
+            await page.waitForSelector('[data-testid^="VB"]', { timeout: 10000 });
+          } else if (url.includes('stubhub.com')) {
+            console.log('Waiting for StubHub ticket listings...');
+            await page.waitForSelector('#listings-container', { timeout: 10000 });
+            await page.waitForSelector('[data-listing-id]', { timeout: 10000 });
+          }
 
           const content = await page.evaluate(() => ({
             text: document.body.innerText,
@@ -113,50 +118,44 @@ class CrawlerService {
             contentLength: content.text.length
           });
 
-          if (content.text.length > 500) {
-            console.log('Page loaded successfully');
-            
-            const isSearchPage = content.url.includes('search');
-            const source = url.includes('stubhub') ? 'stubhub' : 'vividseats';
-            
-            // Use the TicketParser directly instead of Claude
-            const parser = new TicketParser(content.html, source);
-            const parsedContent = isSearchPage 
-              ? parser.parseSearchResults()
-              : parser.parseEventTickets();
+          // Parse content based on page type
+          const isSearchPage = content.url.includes('search');
+          const source = url.includes('stubhub') ? 'stubhub' : 'vividseats';
+          
+          // Use the TicketParser
+          const parser = new TicketParser(content.html, source);
+          const parsedContent = isSearchPage 
+            ? parser.parseSearchResults()
+            : parser.parseEventTickets();
 
-            // Process events if this was a search page
-            if (isSearchPage && parsedContent?.events) {
-              await this.processEventData(parsedContent, source);
-            } 
-            // Process tickets if this was an event page
-            else if (!isSearchPage && searchParams?.eventId) {
-              const tickets = parsedContent?.tickets || [];
-              console.log(`Found ${tickets.length} tickets to process`);
-              await this.processTicketData(tickets, searchParams.eventId, source);
-            }
-
-            return {
-              ...content,
-              parsedContent
-            };
+          // Process events if this was a search page
+          if (isSearchPage && parsedContent?.events) {
+            await this.processEventData(parsedContent, source);
+          } 
+          // Process tickets if this was an event page
+          else if (!isSearchPage && eventId) {
+            const tickets = parsedContent?.tickets || [];
+            console.log(`Found ${tickets.length} tickets to process`);
+            await this.processTicketData(tickets, eventId, source);
           }
 
-          console.log('Invalid content, retrying...');
-          await page.waitForTimeout(this.retryDelays[attempt - 1]);
-          attempt++;
+          return {
+            ...content,
+            parsedContent
+          };
 
         } catch (error) {
-          console.error(`Error in attempt ${attempt}:`, error);
+          console.error(`Attempt ${attempt} failed:`, error.message);
           if (attempt === this.maxAttempts) throw error;
-          await page.waitForTimeout(this.retryDelays[attempt - 1]);
           attempt++;
+          await new Promise(resolve => setTimeout(resolve, this.retryDelays[attempt - 1]));
         }
       }
-
-      throw new Error('Failed to load page after all attempts');
-
+    } catch (error) {
+      console.error('Error loading page:', error);
+      throw error;
     } finally {
+      if (page) await page.close();
       if (context) await context.close();
     }
   }

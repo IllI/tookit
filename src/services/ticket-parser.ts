@@ -19,7 +19,10 @@ interface TicketData {
   row?: string;
   price: number;
   quantity: number;
-  listing_id?: string | null;
+  listing_id: string;
+  source: 'stubhub' | 'vividseats';
+  date_posted: string;
+  sold: boolean;
 }
 
 interface ParsedResponse {
@@ -32,8 +35,24 @@ export class TicketParser {
   private source: 'stubhub' | 'vividseats';
 
   constructor(htmlContent: string, source: 'stubhub' | 'vividseats') {
-    this.dom = new JSDOM(htmlContent);
+    this.dom = new JSDOM(htmlContent, {
+      runScripts: 'outside-only',
+      resources: 'usable',
+      features: {
+        FetchExternalResources: false,
+        ProcessExternalResources: false,
+        SkipExternalResources: true
+      }
+    });
     this.source = source;
+  }
+
+  private getQuantityFromText(text: string): number {
+    const match = text.match(/(\d+)(?:\s*-\s*(\d+))?\s*tickets?/i);
+    if (match) {
+      return parseInt(match[2] || match[1]);
+    }
+    return 1;
   }
 
   private standardizeDate(dateStr: string, source: 'stubhub' | 'vividseats'): string {
@@ -302,75 +321,120 @@ export class TicketParser {
   }
 
   parseEventTickets(): ParsedResponse {
-    return this.source === 'stubhub'
+    const tickets = this.parseTickets();
+    return { tickets };
+  }
+
+  private parseTickets(): TicketData[] {
+    return this.source === 'stubhub' 
       ? this.parseStubHubTickets()
       : this.parseVividSeatsTickets();
   }
 
-  private parseStubHubTickets(): ParsedResponse {
+  private parseStubHubTickets(): TicketData[] {
     const document = this.dom.window.document;
     const tickets: TicketData[] = [];
-
-    // Find ticket listings container
-    const ticketContainer = document.querySelector('[data-testid="ticket-list"]');
-    console.log('ticketContainer', ticketContainer);
-    if (!ticketContainer) return { tickets };
-
-    const listings = ticketContainer.querySelectorAll('[data-testid^="listing-"]');
-    listings.forEach(listing => {
-    
+  
+    // Find listings container and individual listings using data attributes
+    const listingsContainer = document.querySelector('#listings-container');
+    if (!listingsContainer) {
+      console.log('No ticket listings container found');
+      return tickets;
+    }
+  
+    // Get all ticket listing elements using role and data attributes
+    const listings = listingsContainer.querySelectorAll('[role="button"][data-listing-id]');
+    console.log(`Found ${listings.length} StubHub listings`);
+  
+    listings.forEach((listing) => {
       try {
-        const listingId = listing.getAttribute('data-listing-id') || undefined;
-        const section = listing.querySelector('[data-testid*="section"]')?.textContent?.trim() || 'General';
-        const row = listing.querySelector('[data-testid*="row"]')?.textContent?.trim();
+        // Get listing ID from data attribute
+        const listingId = listing.getAttribute('data-listing-id') || 
+                         `stubhub-${Date.now()}-${Math.random()}`;
+  
+        // Get price from data attribute
+        const priceStr = listing.getAttribute('data-price') || '0';
+        const price = parseFloat(priceStr.replace(/[^0-9.]/g, ''));
+  
+        // Get section - it's the first text element in the listing
+        const sectionElement = listing.querySelector('[role="button"] > div > div > div:first-child');
+        const section = sectionElement?.textContent?.trim() || 'General Admission';
+  
+        // Get quantity - look for text containing "tickets"
+        const quantityElements = Array.from(listing.querySelectorAll('div'))
+          .filter(el => el.textContent?.toLowerCase().includes('ticket'));
+        const quantityText = quantityElements[0]?.textContent?.trim() || '1 ticket';
         
-        const priceText = listing.querySelector('[data-testid*="price"]')?.textContent || '0';
-        const price = this.cleanPrice(priceText);
-
-        const quantityText = listing.querySelector('[data-testid*="quantity"]')?.textContent || '1';
-        const quantity = this.cleanQuantity(quantityText);
-
+        // Parse quantity range (e.g. "1 - 4 tickets" -> 4)
+        const quantityMatch = quantityText.match(/(\d+)(?:\s*-\s*(\d+))?\s*tickets?/i);
+        const quantity = quantityMatch ? 
+          parseInt(quantityMatch[2] || quantityMatch[1]) : 1;
+  
+        // Try to find row information if it exists
+        const rowElement = Array.from(listing.querySelectorAll('div'))
+          .find(el => el.textContent?.toLowerCase().includes('row'));
+        const row = rowElement ? 
+          rowElement.textContent?.replace(/row\s*/i, '').trim() : undefined;
+  
         if (section && price > 0) {
-          tickets.push({ 
-            section, 
-            row: row || undefined,
-            price, 
-            quantity, 
-            listing_id: listingId || undefined
+          tickets.push({
+            section,
+            row,
+            price,
+            quantity,
+            listing_id: listingId,
+            source: 'stubhub',
+            date_posted: new Date().toISOString(),
+            sold: false
           });
         }
       } catch (error) {
         console.error('Error parsing StubHub ticket:', error);
       }
     });
-
-    return { tickets };
+  
+    return tickets;
   }
-
-  private parseVividSeatsTickets(): ParsedResponse {
+  
+  private parseVividSeatsTickets(): TicketData[] {
     const document = this.dom.window.document;
     const tickets: TicketData[] = [];
 
-    const ticketRows = document.querySelectorAll('[data-testid="ticket-row"]');
+    // Find all tickets using data-testid attributes
+    const ticketRows = document.querySelectorAll('[data-testid^="VB"]');
+    console.log(`Found ${ticketRows.length} VividSeats ticket rows`);
+
     ticketRows.forEach(row => {
       try {
-        const listingId = row.getAttribute('data-listing-id') || undefined;
-        const section = row.querySelector('[data-testid*="section"]')?.textContent?.trim() || 'General';
-        const rowNum = row.querySelector('[data-testid*="row"]')?.textContent?.trim();
-        
-        const priceText = row.querySelector('[data-testid*="price"]')?.textContent || '0';
-        const price = this.cleanPrice(priceText);
+        // Get listing ID directly from the row
+        const listing_id = row.getAttribute('data-testid') || '';
 
-        const quantityText = row.querySelector('[data-testid*="quantity"]')?.textContent || '1';
-        const quantity = this.cleanQuantity(quantityText);
+        // Get section and row from data attributes
+        const sectionId = row.getAttribute('data-sectionid');
+        const rowId = row.getAttribute('data-rowid');
+        const section = sectionId || 'General Admission';
+        const row_number = rowId?.replace(/^Row\s*/i, '');
+
+        // Get price from price element
+        const priceEl = row.querySelector('[data-testid="listing-price"]');
+        const priceText = priceEl?.textContent?.trim() || '0';
+        const price = parseFloat(priceText.replace(/[^0-9.]/g, ''));
+
+        // Get quantity from ticket count element
+        const quantityEl = row.querySelector('[data-testid="ticket-quantity"]');
+        const quantityText = quantityEl?.textContent || '1';
+        const quantity = this.getQuantityFromText(quantityText);
 
         if (section && price > 0) {
-          tickets.push({ 
-            section, 
-            row: rowNum || undefined,
-            price, 
-            quantity, 
-            listing_id: listingId || undefined
+          tickets.push({
+            section,
+            row: row_number,
+            price,
+            quantity,
+            listing_id,
+            source: 'vividseats',
+            date_posted: new Date().toISOString(),
+            sold: false
           });
         }
       } catch (error) {
@@ -378,18 +442,8 @@ export class TicketParser {
       }
     });
 
-    return { tickets };
+    return tickets;
   }
 
-  private cleanPrice(priceStr: string): number {
-    return parseFloat(priceStr.replace(/[^0-9.]/g, '')) || 0;
-  }
 
-  private cleanQuantity(quantityStr: string): number {
-    const matches = quantityStr.match(/(\d+)(?:\s*-\s*(\d+))?\s*tickets?/i);
-    if (matches) {
-      return parseInt(matches[2] || matches[1]);
-    }
-    return parseInt(quantityStr.replace(/[^0-9]/g, '')) || 1;
-  }
 } 
