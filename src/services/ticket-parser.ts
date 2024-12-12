@@ -335,48 +335,66 @@ export class TicketParser {
     const document = this.dom.window.document;
     const tickets: TicketData[] = [];
   
-    // Find listings container and individual listings using data attributes
     const listingsContainer = document.querySelector('#listings-container');
     if (!listingsContainer) {
       console.log('No ticket listings container found');
       return tickets;
     }
   
-    // Get all ticket listing elements using role and data attributes
     const listings = listingsContainer.querySelectorAll('[role="button"][data-listing-id]');
     console.log(`Found ${listings.length} StubHub listings`);
   
     listings.forEach((listing) => {
       try {
-        // Get listing ID from data attribute
+        // Skip if ticket is sold
+        const soldText = listing.textContent?.toLowerCase() || '';
+        if (soldText.includes('sold')) {
+          return;
+        }
+
         const listingId = listing.getAttribute('data-listing-id') || 
                          `stubhub-${Date.now()}-${Math.random()}`;
   
-        // Get price from data attribute
         const priceStr = listing.getAttribute('data-price') || '0';
         const price = parseFloat(priceStr.replace(/[^0-9.]/g, ''));
   
-        // Get section - it's the first text element in the listing
-        const sectionElement = listing.querySelector('[role="button"] > div > div > div:first-child');
-        const section = sectionElement?.textContent?.trim() || 'General Admission';
-  
-        // Get quantity - look for text containing "tickets"
-        const quantityElements = Array.from(listing.querySelectorAll('div'))
-          .filter(el => el.textContent?.toLowerCase().includes('ticket'));
-        const quantityText = quantityElements[0]?.textContent?.trim() || '1 ticket';
+        // Parse section and row more carefully
+        const sectionText = listing.textContent || '';
         
-        // Parse quantity range (e.g. "1 - 4 tickets" -> 4)
-        const quantityMatch = quantityText.match(/(\d+)(?:\s*-\s*(\d+))?\s*tickets?/i);
-        const quantity = quantityMatch ? 
-          parseInt(quantityMatch[2] || quantityMatch[1]) : 1;
+        let section = 'GA';  // Default to GA
+        let row: string | undefined;
+
+        // Check for VIP tickets first
+        if (sectionText.toLowerCase().includes('vip')) {
+          section = 'VIP';
+        } else {
+          // Try to find specific section numbers/names
+          const sectionMatch = sectionText.match(/Section\s+([A-Z0-9]+)/i);
+          if (sectionMatch) {
+            section = sectionMatch[1].trim();
+          }
+        }
+
+        // Look for row information
+        const rowMatch = sectionText.match(/Row\s+([A-Z0-9]+)/i);
+        if (rowMatch) {
+          row = rowMatch[1].trim();
+        }
+
+        // Get quantity
+        const quantityText = listing.textContent?.match(/(\d+)(?:\s*-\s*(\d+))?\s*tickets?/i) || [];
+        const quantity = parseInt(quantityText[2] || quantityText[1] || '1');
+
+        console.log('Parsed StubHub ticket:', {
+          section,
+          row,
+          price,
+          quantity,
+          listingId,
+          fullText: sectionText.slice(0, 100)
+        });
   
-        // Try to find row information if it exists
-        const rowElement = Array.from(listing.querySelectorAll('div'))
-          .find(el => el.textContent?.toLowerCase().includes('row'));
-        const row = rowElement ? 
-          rowElement.textContent?.replace(/row\s*/i, '').trim() : undefined;
-  
-        if (section && price > 0) {
+        if (price > 0) {
           tickets.push({
             section,
             row,
@@ -400,32 +418,55 @@ export class TicketParser {
     const document = this.dom.window.document;
     const tickets: TicketData[] = [];
 
-    // Find all tickets using data-testid attributes
     const ticketRows = document.querySelectorAll('[data-testid^="VB"]');
     console.log(`Found ${ticketRows.length} VividSeats ticket rows`);
 
     ticketRows.forEach(row => {
       try {
-        // Get listing ID directly from the row
         const listing_id = row.getAttribute('data-testid') || '';
+        const ticketText = row.textContent || '';
 
-        // Get section and row from data attributes
-        const sectionId = row.getAttribute('data-sectionid');
-        const rowId = row.getAttribute('data-rowid');
-        const section = sectionId || 'General Admission';
-        const row_number = rowId?.replace(/^Row\s*/i, '');
+        // Default to GA unless we find specific section info
+        let section = 'GA';
+        let row_number: string | undefined;
 
-        // Get price from price element
+        // Check for VIP first
+        if (ticketText.toLowerCase().includes('vip')) {
+          section = 'VIP';
+        } else {
+          // Look for specific section numbers/names
+          const sectionMatch = ticketText.match(/Section\s+([A-Z0-9]+)/i);
+          if (sectionMatch) {
+            section = sectionMatch[1].trim();
+          }
+        }
+
+        // Look for row information
+        const rowMatch = ticketText.match(/Row\s+([A-Z0-9]+)/i);
+        if (rowMatch) {
+          row_number = rowMatch[1].trim();
+        }
+
+        // Get price
         const priceEl = row.querySelector('[data-testid="listing-price"]');
         const priceText = priceEl?.textContent?.trim() || '0';
         const price = parseFloat(priceText.replace(/[^0-9.]/g, ''));
 
-        // Get quantity from ticket count element
+        // Get quantity
         const quantityEl = row.querySelector('[data-testid="ticket-quantity"]');
         const quantityText = quantityEl?.textContent || '1';
         const quantity = this.getQuantityFromText(quantityText);
 
-        if (section && price > 0) {
+        console.log('Parsed VividSeats ticket:', {
+          section,
+          row: row_number,
+          price,
+          quantity,
+          listing_id,
+          fullText: ticketText.slice(0, 100)
+        });
+
+        if (price > 0) {
           tickets.push({
             section,
             row: row_number,

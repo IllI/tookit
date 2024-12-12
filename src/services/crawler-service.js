@@ -378,11 +378,11 @@ class CrawlerService {
         sold: false
       }));
 
-      // Save to database
+      // Save to database - update onConflict to match the unique constraint
       const { data, error } = await this.supabase
         .from('tickets')
         .upsert(ticketData, { 
-          onConflict: 'event_id,source,listing_id',
+          onConflict: 'event_id,section,row,price',
           returning: true 
         });
 
