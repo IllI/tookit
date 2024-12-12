@@ -90,9 +90,14 @@ class CrawlerService {
       let attempt = 1;
       while (attempt <= this.maxAttempts) {
         try {
-          console.log(`Attempt ${attempt}/${this.maxAttempts} to load: ${url}`);
+          // Add quantity=0 parameter to StubHub event URLs
+          const pageUrl = url.includes('stubhub.com') && !url.includes('search') 
+            ? `${url}${url.includes('?') ? '&' : '?'}quantity=0` 
+            : url;
+
+          console.log(`Attempt ${attempt}/${this.maxAttempts} to load: ${pageUrl}`);
           
-          await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+          await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
           
           // Wait for ticket listings to load
           if (url.includes('vividseats.com')) {
