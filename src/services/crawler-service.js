@@ -85,21 +85,14 @@ class CrawlerService {
 
       // Override navigator.webdriver
       await page.evaluateOnNewDocument(() => {
-        Object.defineProperty(navigator, 'webdriver', {
-          get: () => undefined
-        });
-        window.navigator.chrome = {
-          runtime: {}
-        };
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        window.navigator.chrome = { runtime: {} };
       });
 
       let attempt = 1;
       while (attempt <= this.maxAttempts) {
         try {
-          // Determine source first
           const source = url.includes('stubhub') ? 'stubhub' : 'vividseats';
-
-          // Add quantity=0 parameter to StubHub event URLs
           const pageUrl = url.includes('stubhub.com') && !url.includes('search') 
             ? `${url}${url.includes('?') ? '&' : '?'}quantity=0` 
             : url;
@@ -112,13 +105,15 @@ class CrawlerService {
           if (url.includes('vividseats.com')) {
             console.log('Waiting for VividSeats content...');
             if (url.includes('search') || url.includes('/search/')) {
-              await page.waitForSelector('[data-testid="#app"]', { timeout: 5000 });
+              await page.waitForSelector('[data-testid^="production-listing-"]', { timeout: 5000 });
             } else {
               await page.waitForSelector('[data-testid="listings-container"]', { timeout: 5000 });
             }
           } else if (url.includes('stubhub.com')) {
             console.log('Waiting for StubHub content...');
             if (url.includes('search') || url.includes('/secure/search')) {
+              await page.waitForTimeout(500);
+              await page.reload({ waitUntil: 'domcontentloaded' });
               await page.waitForSelector('#app', { timeout: 5000 });
               await page.waitForSelector('a[href*="/event/"]', { timeout: 5000 });
             } else {

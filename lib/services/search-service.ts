@@ -60,6 +60,8 @@ export class SearchService extends EventEmitter {
           }
 
           // After updating tickets, fetch all current tickets
+          const eventIds = existingEvents.map(e => e.id);  // Get IDs of matching events
+
           const { data: tickets, error } = await this.supabase
             .from('tickets')
             .select(`
@@ -82,6 +84,7 @@ export class SearchService extends EventEmitter {
                 )
               )
             `)
+            .in('event_id', eventIds)  // Add filter here too
             .order('price');
 
           if (error) throw error;
@@ -148,9 +151,18 @@ export class SearchService extends EventEmitter {
         .ilike('name', `%${params.keyword}%`)
         .gte('date', new Date().toISOString());
 
-      const eventIds = matchingEvents?.map(e => e.id) || [];
+      if (!matchingEvents?.length) {
+        this.emit('status', 'No matching events found');
+        return {
+          success: true,
+          data: [],
+          metadata: { totalTickets: 0 }
+        };
+      }
 
-      // Then get tickets for those events
+      const eventIds = matchingEvents.map(e => e.id);
+
+      // Then get tickets only for matching events
       const { data: tickets, error } = await this.supabase
         .from('tickets')
         .select(`
@@ -173,16 +185,13 @@ export class SearchService extends EventEmitter {
             )
           )
         `)
-        .in('event_id', eventIds)  // Filter by the event IDs we found
+        .in('event_id', eventIds)  // Only get tickets for matching events
         .order('price');
 
-      if (error) {
-        throw error;
-      }
+      if (error) throw error;
 
       // Format ticket data
       const formattedTickets = tickets?.map(ticket => {
-        // Find the matching event link for the ticket's source
         const eventLink = ticket.event?.event_links?.find(
           link => link.source === ticket.source
         );
@@ -198,22 +207,13 @@ export class SearchService extends EventEmitter {
         };
       }) || [];
 
-      if (formattedTickets.length > 0) {
-        this.emit('status', `Found ${formattedTickets.length} total tickets`);
-        this.emit('tickets', formattedTickets);
-        
-        return {
-          success: true,
-          data: formattedTickets,
-          metadata: { totalTickets: formattedTickets.length }
-        };
-      }
-
-      this.emit('status', 'No tickets found');
+      this.emit('status', `Found ${formattedTickets.length} total tickets`);
+      this.emit('tickets', formattedTickets);
+      
       return {
         success: true,
-        data: [],
-        metadata: { totalTickets: 0 }
+        data: formattedTickets,
+        metadata: { totalTickets: formattedTickets.length }
       };
 
     } catch (error) {
