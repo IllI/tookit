@@ -70,11 +70,10 @@ class CrawlerService {
       context = await browser.createIncognitoBrowserContext();
       page = await context.newPage();
       
-      // Enhanced stealth setup
+      // Basic stealth setup that was working before
       await page.setViewport({ width: 1920, height: 1080 });
       await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
       
-      // Additional headers and webdriver settings
       await page.setExtraHTTPHeaders({
         'Accept-Language': 'en-US,en;q=0.9',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -83,7 +82,6 @@ class CrawlerService {
         'sec-ch-ua-platform': '"Windows"'
       });
 
-      // Override navigator.webdriver
       await page.evaluateOnNewDocument(() => {
         Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
         window.navigator.chrome = { runtime: {} };
@@ -107,24 +105,13 @@ class CrawlerService {
             if (url.includes('search') || url.includes('/search/')) {
               await page.waitForSelector('[data-testid^="production-listing-"]', { timeout: 5000 });
             } else {
-              let retries = 3;
-              while (retries > 0) {
-                try {
-                  await page.waitForSelector('[data-testid="listings-container"]', { timeout: 5000 });
-                  break;
-                } catch (error) {
-                  console.log(`Retry ${4-retries}/3 for VividSeats event page...`);
-                  retries--;
-                  if (retries > 0) {
-                    await page.reload({ waitUntil: 'domcontentloaded' });
-                    await page.waitForTimeout(2000);
-                  } else {
-                    throw error;
-                  }
-                }
-              }
+              await page.waitForTimeout(1000);
+              await page.reload({ waitUntil: 'domcontentloaded' });
+              await page.waitForTimeout(2000);
+              await page.waitForSelector('[data-testid="listings-container"]', { timeout: 5000 });
             }
           } else if (url.includes('stubhub.com')) {
+            // Keep existing StubHub handling
             console.log('Waiting for StubHub content...');
             if (url.includes('search') || url.includes('/secure/search')) {
               await page.waitForTimeout(500);
