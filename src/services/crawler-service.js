@@ -107,7 +107,22 @@ class CrawlerService {
             if (url.includes('search') || url.includes('/search/')) {
               await page.waitForSelector('[data-testid^="production-listing-"]', { timeout: 5000 });
             } else {
-              await page.waitForSelector('[data-testid="listings-container"]', { timeout: 5000 });
+              let retries = 3;
+              while (retries > 0) {
+                try {
+                  await page.waitForSelector('[data-testid="listings-container"]', { timeout: 5000 });
+                  break;
+                } catch (error) {
+                  console.log(`Retry ${4-retries}/3 for VividSeats event page...`);
+                  retries--;
+                  if (retries > 0) {
+                    await page.reload({ waitUntil: 'domcontentloaded' });
+                    await page.waitForTimeout(2000);
+                  } else {
+                    throw error;
+                  }
+                }
+              }
             }
           } else if (url.includes('stubhub.com')) {
             console.log('Waiting for StubHub content...');

@@ -273,9 +273,9 @@ export class TicketParser {
     const document = this.dom.window.document;
     const events: EventData[] = [];
 
-    // Find event listings using data-testid attribute
-    const eventListings = document.querySelectorAll('div[data-testid^="production-listing-"]');
-    console.log(`Found ${eventListings.length} VividSeats event items`);
+    // Find all event listings
+    const eventListings = Array.from(document.querySelectorAll('[data-testid^="production-listing-"]'));
+    console.log(`Found ${eventListings.length} VividSeats listings`);
 
     eventListings.forEach(listing => {
       try {
@@ -284,6 +284,13 @@ export class TicketParser {
         const href = link?.getAttribute('href') || '';
         const fullUrl = href.startsWith('http') ? href : `https://www.vividseats.com${href}`;
         
+        // Skip parking listings
+        if (href.toLowerCase().includes('parking') || 
+            href.toLowerCase().includes('park pass')) {
+          console.log('Skipping parking listing:', href);
+          return;
+        }
+
         // Get date from date-time element
         const dateElement = listing.querySelector('[data-testid="date-time-left-element"]');
         const dateText = dateElement?.textContent?.replace(/🔥.*?left/g, '').trim() || '';
@@ -306,6 +313,13 @@ export class TicketParser {
         const urlMatch = href.match(/\/([^/]+)-tickets/);
         const name = urlMatch ? 
           urlMatch[1].replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase()) : '';
+
+        // Additional validation to skip non-event listings
+        if (name.toLowerCase().includes('parking') || 
+            venue.toLowerCase().includes('parking')) {
+          console.log('Skipping parking venue/name:', name, venue);
+          return;
+        }
 
         console.log('VividSeats extracted data:', {
           url: href,
