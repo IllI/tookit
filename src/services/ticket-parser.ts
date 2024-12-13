@@ -70,74 +70,97 @@ export class TicketParser {
       .replace(/🔥.*?left/g, '')     // Remove emoji and "tickets left" text
       .replace(/\s+/g, ' ')          // Normalize spaces
       .replace(/(\d)(am|pm)/i, '$1 $2') // Add space before am/pm
+      .replace(/(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)(?:day)?/gi, '') // Remove day of week
       .trim();
 
     console.log('Cleaned date string:', cleaned);
 
-    // Extract components based on source-specific patterns
-    let match;
-    if (source === 'stubhub') {
-      // StubHub format: "Mar 21 2025 Fri 8:00 PM"
-      match = cleaned.match(/(\w{3})\s+(\d{1,2})\s+(\d{4})\s*(?:\w{3})?\s*(\d{1,2}):(\d{2})\s*(AM|PM)/i);
-    } else {
-      // VividSeats format: "FriMar 2120257:00pm"
-      match = cleaned.match(/(?:(\w{3}))?\s*(\w{3})\s*(\d{1,2})\s*(\d{4})\s*(\d{1,2}):(\d{2})\s*(AM|PM)/i);
-    }
-
-    if (!match) {
-      console.error(`Failed to parse ${source} date:`, cleaned);
-      return dateStr;
-    }
-
     try {
-      let month, day, year, hours, minutes, ampm;
+      let match;
       
-      if (source === 'stubhub') {
-        [, month, day, year, hours, minutes, ampm] = match;
+      if (source === 'vividseats') {
+        // Handle VividSeats format: "Dec 2510:00pm" or "Dec 25 10:00 pm"
+        match = cleaned.match(/([A-Za-z]{3})\s*(\d{1,2})\s*(\d{1,2}):(\d{2})\s*(am|pm)/i);
+        if (match) {
+          const [, month, day, hours, minutes, ampm] = match;
+          // Use current year as default
+          const currentYear = new Date().getFullYear();
+          
+          // If the date is in the past for the current year, use next year
+          const eventDate = new Date(`${month} ${day} ${currentYear}`);
+          const now = new Date();
+          const year = eventDate < now ? currentYear + 1 : currentYear;
+
+          return this.createDateFromParts(month, day, year, hours, minutes, ampm);
+        }
       } else {
-        // VividSeats - ignore weekday if present
-        const startIdx = match[1] ? 2 : 1; // Skip weekday if present
-        [, , month, day, year, hours, minutes, ampm] = match;
+        // Handle StubHub format
+        match = cleaned.match(/([A-Za-z]{3})\s+(\d{1,2})\s+(\d{1,2}):(\d{2})\s*(AM|PM)/i) ||  // Dec 25 10:00 PM
+               cleaned.match(/(\d{1,2})\s+([A-Za-z]{3})\s+(\d{1,2}):(\d{2})\s*(AM|PM)/i);      // 25 Dec 10:00 PM
+        
+        if (match) {
+          let month, day, hours, minutes, ampm;
+          
+          if (match[1].match(/[A-Za-z]/)) {
+            // First format: "Dec 25 10:00 PM"
+            [, month, day, hours, minutes, ampm] = match;
+          } else {
+            // Second format: "25 Dec 10:00 PM"
+            [, day, month, hours, minutes, ampm] = match;
+          }
+
+          const currentYear = new Date().getFullYear();
+          const eventDate = new Date(`${month} ${day} ${currentYear}`);
+          const now = new Date();
+          const year = eventDate < now ? currentYear + 1 : currentYear;
+
+          return this.createDateFromParts(month, day, year, hours, minutes, ampm);
+        }
       }
 
-      // Convert month name to number
-      const monthNames = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
-      const monthIndex = monthNames.indexOf(month.toLowerCase());
-      if (monthIndex === -1) {
-        throw new Error(`Invalid month: ${month}`);
-      }
-
-      // Convert to 24-hour time
-      let hour = parseInt(hours);
-      if (ampm.toLowerCase() === 'pm' && hour < 12) hour += 12;
-      if (ampm.toLowerCase() === 'am' && hour === 12) hour = 0;
-
-      // Create date object
-      const date = new Date(
-        parseInt(year),
-        monthIndex,
-        parseInt(day),
-        hour,
-        parseInt(minutes)
-      );
-
-      if (isNaN(date.getTime())) {
-        throw new Error('Invalid date components');
-      }
-
-      console.log('Standardized date:', {
-        input: dateStr,
-        cleaned,
-        components: { month, day, year, hours, minutes, ampm },
-        output: date.toISOString()
-      });
-
-      return date.toISOString();
+      console.error(`Failed to parse ${source} date:`, cleaned);
+      throw new Error(`Invalid date format: ${dateStr}`);
 
     } catch (error) {
       console.error('Error standardizing date:', error);
-      return dateStr;
+      throw error;
     }
+  }
+
+  // Helper method to create date from parts
+  private createDateFromParts(month: string, day: string, year: number, hours: string, minutes: string, ampm: string): string {
+    // Convert month name to number
+    const monthNames = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
+    const monthIndex = monthNames.indexOf(month.toLowerCase());
+    if (monthIndex === -1) {
+      throw new Error(`Invalid month: ${month}`);
+    }
+
+    // Convert to 24-hour time
+    let hour = parseInt(hours);
+    if (ampm.toLowerCase() === 'pm' && hour < 12) hour += 12;
+    if (ampm.toLowerCase() === 'am' && hour === 12) hour = 0;
+
+    // Create date object
+    const date = new Date(
+      year,
+      monthIndex,
+      parseInt(day),
+      hour,
+      parseInt(minutes)
+    );
+
+    if (isNaN(date.getTime())) {
+      throw new Error('Invalid date components');
+    }
+
+    console.log('Standardized date:', {
+      input: `${month} ${day} ${year} ${hours}:${minutes} ${ampm}`,
+      components: { month, day, year, hours, minutes, ampm },
+      output: date.toISOString()
+    });
+
+    return date.toISOString();
   }
 
   parseSearchResults(): ParsedResponse {
@@ -151,99 +174,108 @@ export class TicketParser {
     const document = this.dom.window.document;
     const events: EventData[] = [];
 
-    // Find event containers - look for li elements that have both time and event link
-    const eventContainers = Array.from(document.querySelectorAll('li'))
-      .filter(li => {
-        const hasTime = !!li.querySelector('time');
-        const hasEventLink = !!li.querySelector('a[href*="/event/"]');
-        return hasTime && hasEventLink;
-      });
+    // Check if we're on a search page by looking for the search results grid
+    const isSearchPage = !!document.querySelector('ul[data-testid="primaryGrid"]');
+    
+    // If not a search page, return empty events array
+    if (!isSearchPage) {
+      console.log('Not a search page, skipping event creation');
+      return { events };
+    }
 
-    eventContainers.forEach((container) => {
+    // Find event listings by looking for links to event pages
+    const eventLinks = Array.from(document.querySelectorAll('a[href*="/event/"]'))
+      .filter(a => a.getAttribute('href')?.includes('tickets'));
+
+    console.log(`Found ${eventLinks.length} StubHub event links`);
+
+    eventLinks.forEach(link => {
       try {
-        // Get time element
-        const timeEl = container.querySelector('time');
-        const dateText = timeEl?.textContent?.trim() || '';
-        
-        // Get event link and URL
-        const link = container.querySelector('a[href*="/event/"]');
-        const href = link?.getAttribute('href')?.split('?')[0];
+        const href = link.getAttribute('href') || '';
+        const cleanUrl = href.split('?')[0];
 
-        // Get all spans in the container and filter for content
-        const allSpans = Array.from(container.querySelectorAll('span'));
-        
-        // Name is in the span that's a direct child of the link
-        const nameSpan = link?.querySelector('span');
-        const name = nameSpan?.textContent?.trim();
+        // Get the parent list item container
+        const container = link.closest('li');
+        if (!container) return;
 
-        // Get venue and location from spans that follow a specific pattern
-        const infoSpans = allSpans.filter(span => {
-          const text = span.textContent?.trim() || '';
-          // Exclude spans with generic text
-          return text && 
-                 !text.includes('See tickets') &&
-                 !text.includes('Favorite') &&
-                 !text.includes('Sort by') &&
-                 !text.includes('selling fast') &&
-                 !text.includes('This week') &&
-                 !text.includes('Today') &&
-                 !text.includes('Tomorrow');
-        });
+        // Get all spans with text content
+        const allSpans = Array.from(container.querySelectorAll('span'))
+          .map(span => span.textContent?.trim())
+          .filter(text => text && 
+            !text.includes('See tickets') &&
+            !text.includes('Favorite') &&
+            !text.includes('Sort by') &&
+            !text.includes('Join the list') &&
+            !text.includes('No tickets available'));
 
-        // Venue is typically the second meaningful span
-        const venue = infoSpans[1]?.textContent?.trim();
+        // Get event name from first meaningful span
+        const name = allSpans[0];
 
-        // Location is the span containing "City, ST" format
-        const locationSpan = infoSpans.find(span => 
-          span.textContent?.match(/[A-Za-z\s]+,\s*[A-Z]{2}(?:,\s*USA)?$/)
-        );
-        const locationText = locationSpan?.textContent?.trim() || '';
-        
+        // Find location (City, ST format) first
+        const location = allSpans.find(text => 
+          text.match(/[A-Za-z\s]+,\s*[A-Z]{2}(?:,\s*USA)?$/));
+
+        if (!location) {
+          console.error('No location found');
+          return;
+        }
+
         // Parse city and state from location
-        const [city, state] = locationText.split(',').map(s => s.trim());
+        const [city, state] = location.split(',').map(s => s.trim());
         const stateCode = state?.replace(/, USA$/, '');
 
-        // Parse date components with improved regex to capture each part
-        const dateMatch = dateText.match(/(\w{3})\s+(\d{1,2})\s+(\d{4})\s*(\w{3})\s*(\d{1,2}):(\d{2})\s*(AM|PM)/i);
-        if (dateMatch) {
-          const [, month, day, year, , hours, minutes, ampm] = dateMatch;
-          
-          // Convert month abbreviation to number
-          const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-          const monthNum = monthNames.findIndex(m => m.toLowerCase() === month.toLowerCase()) + 1;
-          
-          // Convert to 24-hour format
-          let hour = parseInt(hours);
-          if (ampm.toLowerCase() === 'pm' && hour < 12) hour += 12;
-          if (ampm.toLowerCase() === 'am' && hour === 12) hour = 0;
+        // Find venue - it should be between the event name and location in the spans
+        const nameIndex = allSpans.findIndex(text => text === name);
+        const locationIndex = allSpans.findIndex(text => text === location);
 
-          // Create ISO timestamp
-          const date = new Date(
-            parseInt(year),
-            monthNum - 1, // JS months are 0-based
-            parseInt(day),
-            hour,
-            parseInt(minutes)
+        let venue: string | undefined;
+        if (nameIndex !== -1 && locationIndex !== -1 && nameIndex < locationIndex) {
+          // Get the span that appears between name and location
+          const possibleVenues = allSpans.slice(nameIndex + 1, locationIndex);
+          venue = possibleVenues.find(text => 
+            text !== name && 
+            text !== location && 
+            !text.match(/[A-Za-z\s]+,\s*[A-Z]{2}(?:,\s*USA)?$/) // Not a location format
           );
+        }
 
-          if (name && venue && city && stateCode && href) {
-            events.push({
-              name,
-              date: date.toISOString(),
-              venue,
-              city,
-              state: stateCode,
-              country: 'USA',
-              location: `${city}, ${stateCode}`,
-              source: 'stubhub',
-              source_url: href.startsWith('http') ? href : `https://www.stubhub.com${href}`,
-              eventUrl: href.startsWith('http') ? href : `https://www.stubhub.com${href}`
-            });
-          }
+        console.log('Venue parsing:', {
+          allSpans,
+          name,
+          nameIndex,
+          locationIndex,
+          possibleVenues: allSpans.slice(nameIndex + 1, locationIndex),
+          selectedVenue: venue
+        });
+
+        // Get date from time element
+        const timeEl = container.querySelector('time');
+        const dateParts = Array.from(timeEl?.querySelectorAll('div') || [])
+          .map(div => div.textContent?.trim())
+          .filter(Boolean);
+
+        const dateStr = dateParts[0] || '';
+        const timePart = dateParts.find(part => part.match(/\d{1,2}:\d{2}/)) || '';
+        const dateText = `${dateStr} ${timePart}`.trim();
+
+        // Validate and add event
+        if (name && venue && city && stateCode && dateText) {
+          events.push({
+            name,
+            date: this.standardizeDate(dateText, 'stubhub'),
+            venue,
+            city,
+            state: stateCode,
+            country: 'USA',
+            location: `${city}, ${stateCode}`,
+            source: 'stubhub',
+            source_url: cleanUrl.startsWith('http') ? cleanUrl : `https://www.stubhub.com${cleanUrl}`,
+            eventUrl: `${cleanUrl}${cleanUrl.includes('?') ? '&' : '?'}quantity=0`
+          });
         }
 
       } catch (error) {
-        console.error('Error parsing event:', error);
+        console.error('Error parsing StubHub event:', error);
       }
     });
 
@@ -278,7 +310,7 @@ export class TicketParser {
         
         // Last span in subtitle is location
         const locationText = spans[spans.length - 1]?.textContent?.replace(/•/g, '').trim() || '';
-        
+
         // Parse city and state from location
         const [city, state] = locationText.split(',').map(s => s.trim());
         const stateCode = state?.replace(/, USA$/, '');
@@ -335,13 +367,8 @@ export class TicketParser {
     const document = this.dom.window.document;
     const tickets: TicketData[] = [];
   
-    const listingsContainer = document.querySelector('#listings-container');
-    if (!listingsContainer) {
-      console.log('No ticket listings container found');
-      return tickets;
-    }
-  
-    const listings = listingsContainer.querySelectorAll('[role="button"][data-listing-id]');
+    // Find all ticket listings - they're usually in a table or list
+    const listings = Array.from(document.querySelectorAll('[data-listing-id], [data-testid*="listing"]'));
     console.log(`Found ${listings.length} StubHub listings`);
   
     listings.forEach((listing) => {
@@ -353,10 +380,15 @@ export class TicketParser {
         }
 
         const listingId = listing.getAttribute('data-listing-id') || 
+                         listing.getAttribute('data-testid')?.split('-').pop() ||
                          `stubhub-${Date.now()}-${Math.random()}`;
   
-        const priceStr = listing.getAttribute('data-price') || '0';
-        const price = parseFloat(priceStr.replace(/[^0-9.]/g, ''));
+        // Try multiple ways to get price
+        const priceText = listing.getAttribute('data-price') || 
+                         listing.querySelector('[data-testid*="price"]')?.textContent ||
+                         listing.textContent?.match(/\$\d+(?:\.\d{2})?/)?.[0] || '0';
+      
+        const price = parseFloat(priceText.replace(/[^0-9.]/g, ''));
   
         // Parse section and row more carefully
         const sectionText = listing.textContent || '';
@@ -381,8 +413,10 @@ export class TicketParser {
           row = rowMatch[1].trim();
         }
 
-        // Get quantity
-        const quantityText = listing.textContent?.match(/(\d+)(?:\s*-\s*(\d+))?\s*tickets?/i) || [];
+        // Get quantity - try multiple patterns
+        const quantityText = sectionText.match(/(\d+)(?:\s*-\s*(\d+))?\s*tickets?/i) || 
+                            sectionText.match(/Qty:\s*(\d+)/i) ||
+                            ['', '1'];
         const quantity = parseInt(quantityText[2] || quantityText[1] || '1');
 
         console.log('Parsed StubHub ticket:', {
@@ -418,7 +452,7 @@ export class TicketParser {
     const document = this.dom.window.document;
     const tickets: TicketData[] = [];
 
-    const ticketRows = document.querySelectorAll('[data-testid^="VB"]');
+    const ticketRows = document.querySelectorAll('[data-testid="listings-container"]');
     console.log(`Found ${ticketRows.length} VividSeats ticket rows`);
 
     ticketRows.forEach(row => {

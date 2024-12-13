@@ -12,6 +12,7 @@ class CrawlerService {
     this.parser = getParser();
     this.maxAttempts = 3;
     this.retryDelays = [2000, 3000, 4000];
+    this.processedEvents = new Set();
     
     // Initialize Supabase client
     this.supabase = createClient(
@@ -56,6 +57,11 @@ class CrawlerService {
   }
 
   async crawlPage({ url, waitForSelector, eventId }) {
+    if (url.includes('search')) {
+      this.processedEvents.clear();
+      console.log('Cleared processed events for new search');
+    }
+
     let context = null;
     let page = null;
     
@@ -90,6 +96,9 @@ class CrawlerService {
       let attempt = 1;
       while (attempt <= this.maxAttempts) {
         try {
+          // Determine source first
+          const source = url.includes('stubhub') ? 'stubhub' : 'vividseats';
+
           // Add quantity=0 parameter to StubHub event URLs
           const pageUrl = url.includes('stubhub.com') && !url.includes('search') 
             ? `${url}${url.includes('?') ? '&' : '?'}quantity=0` 
@@ -99,16 +108,25 @@ class CrawlerService {
           
           await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
           
-          // Wait for ticket listings to load
+          // Wait for content to load based on page type
           if (url.includes('vividseats.com')) {
-            console.log('Waiting for VividSeats ticket listings...');
-            await page.waitForSelector('[data-testid="listings-container"]', { timeout: 10000 });
-            await page.waitForSelector('[data-testid^="VB"]', { timeout: 10000 });
+            console.log('Waiting for VividSeats content...');
+            if (url.includes('search') || url.includes('/search/')) {
+              await page.waitForSelector('[data-testid^="production-listing-"]', { timeout: 5000 });
+            } else {
+              await page.waitForSelector('[data-testid="listings-container"]', { timeout: 5000 });
+            }
           } else if (url.includes('stubhub.com')) {
-            console.log('Waiting for StubHub ticket listings...');
-            await page.waitForSelector('#listings-container', { timeout: 10000 });
-            await page.waitForSelector('[data-listing-id]', { timeout: 10000 });
+            console.log('Waiting for StubHub content...');
+            if (url.includes('search') || url.includes('/secure/search')) {
+              await page.waitForSelector('li time', { timeout: 5000 });
+              await page.waitForSelector('a[href*="/event/"]', { timeout: 5000 });
+            } else {
+              await page.waitForSelector('#listings-container', { timeout: 5000 });
+            }
           }
+
+          await page.waitForTimeout(1000);
 
           const content = await page.evaluate(() => ({
             text: document.body.innerText,
@@ -117,17 +135,18 @@ class CrawlerService {
             url: window.location.href
           }));
 
-          console.log('Page state:', {
-            url: content.url,
-            title: content.title,
-            contentLength: content.text.length
+          // Better search page detection
+          const isSearchPage = url.includes('search') || 
+                             url.includes('/secure/search') || 
+                             url.includes('/search/');
+          
+          console.log('Page type:', {
+            url,
+            isSearchPage,
+            source,
+            hasEventId: !!eventId
           });
 
-          // Parse content based on page type
-          const isSearchPage = content.url.includes('search');
-          const source = url.includes('stubhub') ? 'stubhub' : 'vividseats';
-          
-          // Use the TicketParser
           const parser = new TicketParser(content.html, source);
           const parsedContent = isSearchPage 
             ? parser.parseSearchResults()
@@ -179,27 +198,18 @@ class CrawlerService {
       return;
     }
 
+    // Process each event one at a time
     for (const event of parsedEvents.events) {
       try {
-        console.log('Processing event:', JSON.stringify(event));
-        this.sendStatus(`Processing event: ${event}`);
-        
-        if (event.name.toLowerCase().includes('parking')) {
-          console.log('Skipping parking event:', event.name);
-          continue;
-        }
-
-        const date = new Date(event.date);
-        if (isNaN(date.getTime())) {
-          console.error('Invalid date format:', event.date);
-          continue;
-        }
+        // Track if we've seen this event before
+        const eventKey = `${event.name}-${event.venue}-${event.date}`;
+        const seenBefore = this.processedEvents.has(eventKey);
+        this.processedEvents.add(eventKey);
 
         // Check for existing event with fuzzy name matching
         const { data: existingEvents } = await this.supabase
           .from('events')
-          .select('id, name, date, venue')
-          .eq('venue', event.venue)
+          .select('id, name, date, venue, city')
           .eq('city', event.city)
           .eq('state', event.state);
 
@@ -209,55 +219,39 @@ class CrawlerService {
         if (existingEvents?.length) {
           const matchingEvent = existingEvents.find(existing => {
             const existingDate = new Date(existing.date);
-            const timeDiff = Math.abs(existingDate.getTime() - date.getTime());
+            const eventDate = new Date(event.date);
+            const timeDiff = Math.abs(existingDate.getTime() - eventDate.getTime());
             const hoursDiff = timeDiff / (1000 * 60 * 60);
             
-            // Consider events within 24 hours and with similar names as the same event
+            // Consider events matching if:
+            // 1. Names are similar
+            // 2. Within 24 hours
+            // 3. Same city (even if venue differs)
             const namesSimilar = this.areNamesSimilar(existing.name, event.name);
             return hoursDiff <= 24 && namesSimilar;
           });
 
           if (matchingEvent) {
             eventId = matchingEvent.id;
-            console.log('Found matching event:', matchingEvent.name);
+            console.log('Found matching event:', {
+              name: matchingEvent.name,
+              venue: matchingEvent.venue,
+              matchedWith: {
+                name: event.name,
+                venue: event.venue
+              }
+            });
           }
         }
 
-        if (eventId) {
-          // Check for existing event link
-          const { data: existingLink } = await this.supabase
-            .from('event_links')
-            .select('url')
-            .eq('event_id', eventId)
-            .eq('source', source)
-            .single();
-
-          if (!existingLink) {
-            console.log(`Adding new ${source} link for existing event`);
-            await this.supabase
-              .from('event_links')
-              .insert({
-                event_id: eventId,
-                source,
-                url: event.eventUrl
-              });
-          } else if (existingLink.url !== event.eventUrl) {
-            console.log(`Updating ${source} link for event`);
-            await this.supabase
-              .from('event_links')
-              .update({ url: event.eventUrl })
-              .eq('event_id', eventId)
-              .eq('source', source);
-          } else {
-            console.log(`Event link for ${source} already exists and matches`);
-          }
-        } else {
+        // Only create new event if we haven't seen it before
+        if (!eventId && !seenBefore) {
           // Create new event
           const { data: newEvent, error: eventError } = await this.supabase
             .from('events')
             .insert([{
               name: event.name,
-              date,
+              date: event.date,
               venue: event.venue,
               city: event.city,
               state: event.state,
@@ -276,31 +270,57 @@ class CrawlerService {
 
           eventId = newEvent.id;
           console.log('Created new event:', event.name);
+        }
 
-          // Create event link
-          await this.supabase
+        // Always update event link, whether the event is new or existing
+        if (eventId) {
+          // Check for existing event links - allow multiple per source
+          const { data: existingLinks } = await this.supabase
             .from('event_links')
-            .insert({
-              event_id: eventId,
-              source,
-              url: event.eventUrl
-            });
-          console.log(`Added ${source} link for new event`);
+            .select('url')
+            .eq('event_id', eventId)
+            .eq('source', source);
+
+          // Check if this exact URL already exists
+          const hasLink = existingLinks?.some(link => link.url === event.eventUrl);
+
+          if (!hasLink) {
+            console.log(`Adding new ${source} link for event`);
+            await this.supabase
+              .from('event_links')
+              .insert({
+                event_id: eventId,
+                source,
+                url: event.eventUrl
+              });
+          } else {
+            console.log(`Event link for ${source} already exists`);
+          }
         }
 
         // Visit event page to scrape tickets
-        if (event.eventUrl) {
+        if (event.eventUrl && eventId) {
           this.sendStatus(`Fetching tickets for ${event.name}...`);
-          const eventPageContent = await this.crawlPage({
-            url: event.eventUrl,
-            eventId // Pass eventId for ticket processing
-          });
-          this.sendStatus(`Finished processing tickets for ${event.name}`);
+          
+          try {
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            
+            await this.crawlPage({
+              url: event.eventUrl,
+              eventId,
+              waitForSelector: source === 'stubhub' ? '#listings-container' : '[data-testid="listings-container"]'
+            });
+
+          } catch (pageError) {
+            console.error('Error visiting event page:', {
+              url: event.eventUrl,
+              error: pageError.message
+            });
+          }
         }
 
       } catch (error) {
         console.error('Error processing event:', error);
-        this.sendStatus(`Error processing event: ${event.name}`);
       }
     }
   }
@@ -407,6 +427,40 @@ class CrawlerService {
       console.error(`Failed to process tickets for ${source}:`, error);
       this.sendStatus(`Error processing tickets for ${source}`);
       return 0;
+    }
+  }
+
+  async updateEventLink(eventId, source, eventUrl) {
+    try {
+      // Check for existing event link
+      const { data: existingLink } = await this.supabase
+        .from('event_links')
+        .select('url')
+        .eq('event_id', eventId)
+        .eq('source', source)
+        .single();
+
+      if (!existingLink) {
+        console.log(`Adding new ${source} link for existing event`);
+        await this.supabase
+          .from('event_links')
+          .insert({
+            event_id: eventId,
+            source,
+            url: eventUrl
+          });
+      } else if (existingLink.url !== eventUrl) {
+        console.log(`Updating ${source} link for event`);
+        await this.supabase
+          .from('event_links')
+          .update({ url: eventUrl })
+          .eq('event_id', eventId)
+          .eq('source', source);
+      } else {
+        console.log(`Event link for ${source} already exists and matches`);
+      }
+    } catch (error) {
+      console.error('Error updating event link:', error);
     }
   }
 }
