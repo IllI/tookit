@@ -112,14 +112,14 @@ class CrawlerService {
           if (url.includes('vividseats.com')) {
             console.log('Waiting for VividSeats content...');
             if (url.includes('search') || url.includes('/search/')) {
-              await page.waitForSelector('[data-testid^="production-listing-"]', { timeout: 5000 });
+              await page.waitForSelector('[data-testid="#app"]', { timeout: 5000 });
             } else {
               await page.waitForSelector('[data-testid="listings-container"]', { timeout: 5000 });
             }
           } else if (url.includes('stubhub.com')) {
             console.log('Waiting for StubHub content...');
             if (url.includes('search') || url.includes('/secure/search')) {
-              await page.waitForSelector('li time', { timeout: 5000 });
+              await page.waitForSelector('#app', { timeout: 5000 });
               await page.waitForSelector('a[href*="/event/"]', { timeout: 5000 });
             } else {
               await page.waitForSelector('#listings-container', { timeout: 5000 });
