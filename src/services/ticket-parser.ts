@@ -71,6 +71,8 @@ export class TicketParser {
       .replace(/\s+/g, ' ')          // Normalize spaces
       .replace(/(\d)(am|pm)/i, '$1 $2') // Add space before am/pm
       .replace(/(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)(?:day)?/gi, '') // Remove day of week
+      // Add spaces between stuck-together date components
+      .replace(/([A-Za-z]{3})(\d{1,2})(\d{4})/, '$1 $2 $3')
       .trim();
 
     console.log('Cleaned date string:', cleaned);
@@ -79,40 +81,25 @@ export class TicketParser {
       let match;
       
       if (source === 'vividseats') {
-        // Handle VividSeats format: "Dec 2510:00pm" or "Dec 25 10:00 pm"
-        match = cleaned.match(/([A-Za-z]{3})\s*(\d{1,2})\s*(\d{1,2}):(\d{2})\s*(am|pm)/i);
+        // Handle VividSeats formats:
+        // "Aug 29 2025 6:01 pm" (with year)
+        // "Aug 292025 6:01 pm" (stuck together)
+        // "Dec 25 10:00 pm" (without year)
+        match = cleaned.match(/([A-Za-z]{3})\s*(\d{1,2})(?:\s*(\d{4}))?\s*(\d{1,2}):(\d{2})\s*(am|pm)/i);
+        
         if (match) {
-          const [, month, day, hours, minutes, ampm] = match;
-          // Use current year as default
-          const currentYear = new Date().getFullYear();
-          
-          // If the date is in the past for the current year, use next year
-          const eventDate = new Date(`${month} ${day} ${currentYear}`);
-          const now = new Date();
-          const year = eventDate < now ? currentYear + 1 : currentYear;
+          const [, month, day, yearStr, hours, minutes, ampm] = match;
+          const year = yearStr ? parseInt(yearStr) : new Date().getFullYear();
 
           return this.createDateFromParts(month, day, year, hours, minutes, ampm);
         }
       } else {
-        // Handle StubHub format
-        match = cleaned.match(/([A-Za-z]{3})\s+(\d{1,2})\s+(\d{1,2}):(\d{2})\s*(AM|PM)/i) ||  // Dec 25 10:00 PM
-               cleaned.match(/(\d{1,2})\s+([A-Za-z]{3})\s+(\d{1,2}):(\d{2})\s*(AM|PM)/i);      // 25 Dec 10:00 PM
+        // StubHub format handling remains the same
+        match = cleaned.match(/([A-Za-z]{3})\s+(\d{1,2})(?:\s+(\d{4}))?\s+(\d{1,2}):(\d{2})\s*(AM|PM)/i);
         
         if (match) {
-          let month, day, hours, minutes, ampm;
-          
-          if (match[1].match(/[A-Za-z]/)) {
-            // First format: "Dec 25 10:00 PM"
-            [, month, day, hours, minutes, ampm] = match;
-          } else {
-            // Second format: "25 Dec 10:00 PM"
-            [, day, month, hours, minutes, ampm] = match;
-          }
-
-          const currentYear = new Date().getFullYear();
-          const eventDate = new Date(`${month} ${day} ${currentYear}`);
-          const now = new Date();
-          const year = eventDate < now ? currentYear + 1 : currentYear;
+          const [, month, day, yearStr, hours, minutes, ampm] = match;
+          const year = yearStr ? parseInt(yearStr) : new Date().getFullYear();
 
           return this.createDateFromParts(month, day, year, hours, minutes, ampm);
         }
