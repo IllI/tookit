@@ -47,9 +47,10 @@ class CrawlerService {
         }
       }
 
+      // More stable launch configuration
       this.browser = await puppeteer.launch({
         headless: 'new',
-        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome-stable',
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',
@@ -59,14 +60,17 @@ class CrawlerService {
           '--no-zygote',
           '--single-process',
           '--disable-extensions',
-          '--disable-software-rasterizer'
+          '--disable-software-rasterizer',
+          '--disable-web-security',
+          '--disable-features=IsolateOrigins,site-per-process',
+          '--ignore-certificate-errors',
+          '--window-size=1920,1080'
         ],
-        pipe: true  // Use pipe instead of WebSocket
+        ignoreHTTPSErrors: true,
+        timeout: 60000,
+        protocolTimeout: 60000
       });
 
-      // Store browser endpoint for reconnection if needed
-      this.browserWSEndpoint = await this.browser.wsEndpoint();
-      
       // Handle disconnection
       this.browser.on('disconnected', async () => {
         console.log('Browser disconnected, cleaning up');
@@ -89,134 +93,143 @@ class CrawlerService {
 
     let context = null;
     let page = null;
-    
-    try {
-      const { browser } = await this.initialize();
-      
-      // Create new context for each page
+    let retries = 3;
+
+    while (retries > 0) {
       try {
+        const { browser } = await this.initialize();
+        
+        // Create new context for each page
         context = await browser.createIncognitoBrowserContext();
         page = await context.newPage();
-      } catch (error) {
-        console.error('Error creating page:', error);
-        // Try to reconnect if context/page creation fails
-        await this.cleanup();
-        const { browser: newBrowser } = await this.initialize();
-        context = await newBrowser.createIncognitoBrowserContext();
-        page = await context.newPage();
-      }
-      
-      // Basic stealth setup that was working before
-      await page.setViewport({ width: 1920, height: 1080 });
-      await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
-      
-      await page.setExtraHTTPHeaders({
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'sec-ch-ua': '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
-        'sec-ch-ua-mobile': '?0',
-        'sec-ch-ua-platform': '"Windows"'
-      });
 
-      await page.evaluateOnNewDocument(() => {
-        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-        window.navigator.chrome = { runtime: {} };
-      });
+        // Rest of your existing page setup code...
+        await page.setViewport({ width: 1920, height: 1080 });
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
+        
+        // Set longer timeouts
+        page.setDefaultTimeout(30000);
+        page.setDefaultNavigationTimeout(30000);
 
-      let attempt = 1;
-      while (attempt <= this.maxAttempts) {
-        try {
-          const source = url.includes('stubhub') ? 'stubhub' : 'vividseats';
-          const pageUrl = url.includes('stubhub.com') && !url.includes('search') 
-            ? `${url}${url.includes('?') ? '&' : '?'}quantity=0` 
-            : url;
+        await page.setExtraHTTPHeaders({
+          'Accept-Language': 'en-US,en;q=0.9',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+          'sec-ch-ua': '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+          'sec-ch-ua-mobile': '?0',
+          'sec-ch-ua-platform': '"Windows"'
+        });
 
-          console.log(`Attempt ${attempt}/${this.maxAttempts} to load: ${pageUrl}`);
-          
-          await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-          
-          // Wait for content to load based on page type
-          if (url.includes('vividseats.com')) {
-            console.log('Waiting for VividSeats content...');
-            if (url.includes('search') || url.includes('/search/')) {
-              await page.waitForSelector('[data-testid^="production-listing-"]', { timeout: 5000 });
-            } else {
-              await page.waitForTimeout(1000);
-              await page.reload({ waitUntil: 'domcontentloaded' });
-              await page.waitForTimeout(2000);
-              await page.waitForSelector('[data-testid="listings-container"]', { timeout: 5000 });
+        await page.evaluateOnNewDocument(() => {
+          Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+          window.navigator.chrome = { runtime: {} };
+        });
+
+        let attempt = 1;
+        while (attempt <= this.maxAttempts) {
+          try {
+            const source = url.includes('stubhub') ? 'stubhub' : 'vividseats';
+            const pageUrl = url.includes('stubhub.com') && !url.includes('search') 
+              ? `${url}${url.includes('?') ? '&' : '?'}quantity=0` 
+              : url;
+
+            console.log(`Attempt ${attempt}/${this.maxAttempts} to load: ${pageUrl}`);
+            
+            await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+            
+            // Wait for content to load based on page type
+            if (url.includes('vividseats.com')) {
+              console.log('Waiting for VividSeats content...');
+              if (url.includes('search') || url.includes('/search/')) {
+                await page.waitForSelector('[data-testid^="production-listing-"]', { timeout: 5000 });
+              } else {
+                await page.waitForTimeout(1000);
+                await page.reload({ waitUntil: 'domcontentloaded' });
+                await page.waitForTimeout(2000);
+                await page.waitForSelector('[data-testid="listings-container"]', { timeout: 5000 });
+              }
+            } else if (url.includes('stubhub.com')) {
+              // Keep existing StubHub handling
+              console.log('Waiting for StubHub content...');
+              if (url.includes('search') || url.includes('/secure/search')) {
+                await page.waitForTimeout(500);
+                await page.reload({ waitUntil: 'domcontentloaded' });
+                await page.waitForSelector('#app', { timeout: 5000 });
+                await page.waitForSelector('a[href*="/event/"]', { timeout: 5000 });
+              } else {
+                await page.waitForSelector('#listings-container', { timeout: 5000 });
+              }
             }
-          } else if (url.includes('stubhub.com')) {
-            // Keep existing StubHub handling
-            console.log('Waiting for StubHub content...');
-            if (url.includes('search') || url.includes('/secure/search')) {
-              await page.waitForTimeout(500);
-              await page.reload({ waitUntil: 'domcontentloaded' });
-              await page.waitForSelector('#app', { timeout: 5000 });
-              await page.waitForSelector('a[href*="/event/"]', { timeout: 5000 });
-            } else {
-              await page.waitForSelector('#listings-container', { timeout: 5000 });
+
+            await page.waitForTimeout(1000);
+
+            const content = await page.evaluate(() => ({
+              text: document.body.innerText,
+              html: document.documentElement.outerHTML,
+              title: document.title,
+              url: window.location.href
+            }));
+
+            // Better search page detection
+            const isSearchPage = url.includes('search') || 
+                               url.includes('/secure/search') || 
+                               url.includes('/search/');
+            
+            console.log('Page type:', {
+              url,
+              isSearchPage,
+              source,
+              hasEventId: !!eventId
+            });
+
+            const parser = new TicketParser(content.html, source);
+            const parsedContent = isSearchPage 
+              ? parser.parseSearchResults()
+              : parser.parseEventTickets();
+
+            // Process events if this was a search page
+            if (isSearchPage && parsedContent?.events) {
+              await this.processEventData(parsedContent, source);
+            } 
+            // Process tickets if this was an event page
+            else if (!isSearchPage && eventId) {
+              const tickets = parsedContent?.tickets || [];
+              console.log(`Found ${tickets.length} tickets to process`);
+              await this.processTicketData(tickets, eventId, source);
             }
+
+            return {
+              ...content,
+              parsedContent
+            };
+
+          } catch (error) {
+            console.error(`Attempt ${attempt} failed:`, error.message);
+            if (attempt === this.maxAttempts) throw error;
+            attempt++;
+            await new Promise(resolve => setTimeout(resolve, this.retryDelays[attempt - 1]));
           }
-
-          await page.waitForTimeout(1000);
-
-          const content = await page.evaluate(() => ({
-            text: document.body.innerText,
-            html: document.documentElement.outerHTML,
-            title: document.title,
-            url: window.location.href
-          }));
-
-          // Better search page detection
-          const isSearchPage = url.includes('search') || 
-                             url.includes('/secure/search') || 
-                             url.includes('/search/');
-          
-          console.log('Page type:', {
-            url,
-            isSearchPage,
-            source,
-            hasEventId: !!eventId
-          });
-
-          const parser = new TicketParser(content.html, source);
-          const parsedContent = isSearchPage 
-            ? parser.parseSearchResults()
-            : parser.parseEventTickets();
-
-          // Process events if this was a search page
-          if (isSearchPage && parsedContent?.events) {
-            await this.processEventData(parsedContent, source);
-          } 
-          // Process tickets if this was an event page
-          else if (!isSearchPage && eventId) {
-            const tickets = parsedContent?.tickets || [];
-            console.log(`Found ${tickets.length} tickets to process`);
-            await this.processTicketData(tickets, eventId, source);
-          }
-
-          return {
-            ...content,
-            parsedContent
-          };
-
-        } catch (error) {
-          console.error(`Attempt ${attempt} failed:`, error.message);
-          if (attempt === this.maxAttempts) throw error;
-          attempt++;
-          await new Promise(resolve => setTimeout(resolve, this.retryDelays[attempt - 1]));
         }
-      }
-    } catch (error) {
-      console.error('Error loading page:', error);
-      throw error;
-    } finally {
-      try {
-        if (page) await page.close();
-        if (context) await context.close();
+
+        break; // If we get here, everything worked
       } catch (error) {
-        console.error('Error cleaning up page/context:', error);
+        console.error(`Attempt ${4-retries}/3 failed:`, error);
+        retries--;
+        
+        // Clean up failed attempt
+        try {
+          if (page) await page.close();
+          if (context) await context.close();
+        } catch (cleanupError) {
+          console.error('Error during cleanup:', cleanupError);
+        }
+
+        if (retries === 0) throw error;
+        
+        // Wait before retrying
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        
+        // Force browser cleanup on error
+        await this.cleanup();
       }
     }
   }
