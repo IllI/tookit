@@ -2,6 +2,8 @@ import { createClient } from '@supabase/supabase-js';
 import core from 'puppeteer-core';
 import { getParser } from './llm-service';
 
+const DEFAULT_CHROME_PATH = '/usr/bin/google-chrome-stable';
+
 class CrawlerService {
   constructor() {
     this.browser = null;
@@ -20,36 +22,17 @@ class CrawlerService {
     this.searchService = service;
   }
 
-  async findChromePath() {
-    const { execSync } = require('child_process');
-    const paths = [
-      '/usr/bin/google-chrome-stable',
-      '/usr/bin/google-chrome',
-      '/opt/google/chrome/chrome',
-      '/opt/chrome/chrome'
-    ];
-
-    for (const path of paths) {
-      try {
-        execSync(`test -f ${path}`);
-        const version = execSync(`${path} --version`).toString().trim();
-        console.log(`Found Chrome at ${path}, version: ${version}`);
-        return path;
-      } catch (e) {
-        console.log(`No Chrome at ${path}`);
-      }
-    }
-
+  verifyChromePath(path) {
     try {
-      const path = execSync('which google-chrome-stable').toString().trim();
-      const version = execSync(`${path} --version`).toString().trim();
-      console.log(`Found Chrome using which: ${path}, version: ${version}`);
-      return path;
+      const { execSync } = require('child_process');
+      execSync(`test -f ${path}`);
+      const version = execSync(`${path} --version`).toString();
+      console.log(`Verified Chrome at ${path}: ${version}`);
+      return true;
     } catch (e) {
-      console.log('Failed to find Chrome using which');
+      console.log(`Failed to verify Chrome at ${path}: ${e.message}`);
+      return false;
     }
-
-    return null;
   }
 
   async initialize() {
@@ -57,52 +40,44 @@ class CrawlerService {
       console.log('Setting up browser...');
       
       try {
-        const chromePath = await this.findChromePath();
-        console.log('Chrome path search complete');
-        
-        if (!chromePath) {
-          console.error('Could not find Chrome installation');
-          try {
-            const { execSync } = require('child_process');
-            console.log('System Chrome information:');
-            console.log(execSync('apt list --installed | grep chrome').toString());
-            console.log(execSync('find /usr -name "*chrome*" -type f 2>/dev/null').toString());
-          } catch (e) {
-            console.log('Failed to get system Chrome information:', e.message);
-          }
-          throw new Error('Chrome not found');
+        // Verify Chrome installation
+        if (!this.verifyChromePath(DEFAULT_CHROME_PATH)) {
+          throw new Error(`Chrome not found at ${DEFAULT_CHROME_PATH}`);
         }
 
         const launchOptions = {
-          executablePath: chromePath,
+          executablePath: DEFAULT_CHROME_PATH,
           headless: 'new',
           args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
-            '--disable-gpu',
-            '--disable-software-rasterizer',
-            '--disable-dev-tools'
+            '--disable-gpu'
           ]
         };
 
         console.log('Launching browser with options:', JSON.stringify(launchOptions, null, 2));
+        
         this.browser = await core.launch(launchOptions);
+        console.log('Browser launched successfully');
         
         const version = await this.browser.version();
-        console.log('Browser launched successfully. Version:', version);
+        console.log('Browser version:', version);
         
       } catch (error) {
-        console.error('Browser initialization error with full details:', {
-          error: error.message,
-          stack: error.stack,
-          code: error.code,
-          cmd: error.cmd,
-          killed: error.killed,
-          signal: error.signal,
-          stdout: error.stdout,
-          stderr: error.stderr
-        });
+        console.error('Browser initialization error:', error);
+        const { execSync } = require('child_process');
+        try {
+          console.log('System information:');
+          console.log('Chrome package status:');
+          console.log(execSync('dpkg -l | grep -i chrome').toString());
+          console.log('Chrome binary location:');
+          console.log(execSync('which google-chrome-stable').toString());
+          console.log('Chrome version:');
+          console.log(execSync('google-chrome-stable --version').toString());
+        } catch (e) {
+          console.error('Failed to get system information:', e);
+        }
         throw error;
       }
     }
