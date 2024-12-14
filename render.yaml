@@ -4,25 +4,37 @@ services:
     env: node
     buildCommand: |
       set -ex
+      # Configure environment
       yarn config set network-timeout 300000
       yarn config set legacy-peer-deps true
-      # Install Chrome dependencies
-      apt-get update -y
-      apt-get install -y wget xvfb gnupg fonts-liberation libasound2 libcurl4 libgbm1 libnspr4 libnss3 libu2f-udev xdg-utils
-      # Download and install Chrome
-      wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add -
-      echo "deb http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list
-      apt-get update
-      apt-get install -y google-chrome-stable
-      # Verify Chrome installation
-      echo "Chrome version:"
-      google-chrome-stable --version
-      ls -la /usr/bin/google-chrome*
-      which google-chrome-stable
-      # Setup cache directory
+      
+      # Create directories
+      mkdir -p /opt/render/chrome
       mkdir -p /opt/render/.cache/puppeteer
       chmod -R 777 /opt/render/.cache/puppeteer
-      # Install dependencies and build
+      
+      # Install dependencies
+      apt-get update -y
+      apt-get install -y ca-certificates fonts-liberation libasound2 libatk-bridge2.0-0 \
+        libatk1.0-0 libc6 libcairo2 libcups2 libdbus-1-3 libexpat1 libfontconfig1 \
+        libgbm1 libgcc1 libglib2.0-0 libgtk-3-0 libnspr4 libnss3 libpango-1.0-0 \
+        libpangocairo-1.0-0 libstdc++6 libx11-6 libx11-xcb1 libxcb1 libxcomposite1 \
+        libxcursor1 libxdamage1 libxext6 libxfixes3 libxi6 libxrandr2 libxrender1 \
+        libxss1 libxtst6 lsb-release wget xdg-utils unzip
+      
+      # Download and set up Chrome
+      cd /opt/render/chrome
+      wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+      dpkg -i google-chrome-stable_current_amd64.deb || apt-get -f install -y
+      
+      # Verify Chrome installation
+      echo "Chrome version:"
+      google-chrome-stable --version || true
+      which google-chrome-stable || true
+      ls -la /usr/bin/google-chrome* || true
+      
+      # Install project dependencies and build
+      cd /opt/render/project/src
       yarn install --network-timeout 300000
       yarn build
     startCommand: yarn start

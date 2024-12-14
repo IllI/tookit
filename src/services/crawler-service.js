@@ -20,32 +20,31 @@ class CrawlerService {
     this.searchService = service;
   }
 
-  findChromePath() {
-    const possiblePaths = [
+  async findChromePath() {
+    const { execSync } = require('child_process');
+    const paths = [
       '/usr/bin/google-chrome-stable',
       '/usr/bin/google-chrome',
-      '/usr/bin/chromium',
-      '/usr/bin/chromium-browser'
+      '/opt/google/chrome/chrome',
+      '/opt/chrome/chrome'
     ];
 
-    for (const path of possiblePaths) {
+    for (const path of paths) {
       try {
-        const { execSync } = require('child_process');
         execSync(`test -f ${path}`);
-        console.log(`Found browser at: ${path}`);
+        const version = execSync(`${path} --version`).toString().trim();
+        console.log(`Found Chrome at ${path}, version: ${version}`);
         return path;
       } catch (e) {
-        console.log(`Browser not found at: ${path}`);
+        console.log(`No Chrome at ${path}`);
       }
     }
 
     try {
-      const { execSync } = require('child_process');
-      const output = execSync('which google-chrome-stable').toString().trim();
-      if (output) {
-        console.log(`Found Chrome using which: ${output}`);
-        return output;
-      }
+      const path = execSync('which google-chrome-stable').toString().trim();
+      const version = execSync(`${path} --version`).toString().trim();
+      console.log(`Found Chrome using which: ${path}, version: ${version}`);
+      return path;
     } catch (e) {
       console.log('Failed to find Chrome using which');
     }
@@ -58,16 +57,18 @@ class CrawlerService {
       console.log('Setting up browser...');
       
       try {
-        const chromePath = this.findChromePath();
+        const chromePath = await this.findChromePath();
+        console.log('Chrome path search complete');
+        
         if (!chromePath) {
           console.error('Could not find Chrome installation');
-          const { execSync } = require('child_process');
           try {
-            console.log('Available Chrome binaries:');
-            console.log(execSync('ls -la /usr/bin/google-chrome*').toString());
-            console.log(execSync('ls -la /usr/bin/chromium*').toString());
+            const { execSync } = require('child_process');
+            console.log('System Chrome information:');
+            console.log(execSync('apt list --installed | grep chrome').toString());
+            console.log(execSync('find /usr -name "*chrome*" -type f 2>/dev/null').toString());
           } catch (e) {
-            console.log('No Chrome binaries found');
+            console.log('Failed to get system Chrome information:', e.message);
           }
           throw new Error('Chrome not found');
         }
@@ -79,7 +80,9 @@ class CrawlerService {
             '--no-sandbox',
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
-            '--disable-gpu'
+            '--disable-gpu',
+            '--disable-software-rasterizer',
+            '--disable-dev-tools'
           ]
         };
 
