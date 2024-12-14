@@ -20,6 +20,7 @@ class CrawlerService {
       process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
     );
     this.searchService = null;
+    this.browserWSEndpoint = null;
   }
 
   setSearchService(service) {
@@ -34,28 +35,50 @@ class CrawlerService {
   }
 
   async initialize() {
-    if (!this.browser) {
-      try {
-        this.browser = await puppeteer.launch({
-          headless: 'new',
-          executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
-          args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-gpu',
-            '--no-first-run',
-            '--no-zygote',
-            '--single-process',
-            '--disable-extensions'
-          ]
-        });
-      } catch (error) {
-        console.error('Browser launch error:', error);
-        throw error;
+    try {
+      if (this.browser) {
+        try {
+          // Test if browser is still responsive
+          const pages = await this.browser.pages();
+          return { browser: this.browser };
+        } catch (error) {
+          console.log('Existing browser disconnected, launching new one');
+          await this.cleanup();
+        }
       }
+
+      this.browser = await puppeteer.launch({
+        headless: 'new',
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-gpu',
+          '--no-first-run',
+          '--no-zygote',
+          '--single-process',
+          '--disable-extensions',
+          '--disable-software-rasterizer'
+        ],
+        pipe: true  // Use pipe instead of WebSocket
+      });
+
+      // Store browser endpoint for reconnection if needed
+      this.browserWSEndpoint = await this.browser.wsEndpoint();
+      
+      // Handle disconnection
+      this.browser.on('disconnected', async () => {
+        console.log('Browser disconnected, cleaning up');
+        this.browser = null;
+        this.browserWSEndpoint = null;
+      });
+
+      return { browser: this.browser };
+    } catch (error) {
+      console.error('Browser initialization error:', error);
+      throw error;
     }
-    return { browser: this.browser };
   }
 
   async crawlPage({ url, waitForSelector, eventId }) {
@@ -69,8 +92,19 @@ class CrawlerService {
     
     try {
       const { browser } = await this.initialize();
-      context = await browser.createIncognitoBrowserContext();
-      page = await context.newPage();
+      
+      // Create new context for each page
+      try {
+        context = await browser.createIncognitoBrowserContext();
+        page = await context.newPage();
+      } catch (error) {
+        console.error('Error creating page:', error);
+        // Try to reconnect if context/page creation fails
+        await this.cleanup();
+        const { browser: newBrowser } = await this.initialize();
+        context = await newBrowser.createIncognitoBrowserContext();
+        page = await context.newPage();
+      }
       
       // Basic stealth setup that was working before
       await page.setViewport({ width: 1920, height: 1080 });
@@ -178,16 +212,25 @@ class CrawlerService {
       console.error('Error loading page:', error);
       throw error;
     } finally {
-      if (page) await page.close();
-      if (context) await context.close();
+      try {
+        if (page) await page.close();
+        if (context) await context.close();
+      } catch (error) {
+        console.error('Error cleaning up page/context:', error);
+      }
     }
   }
 
   async cleanup() {
-    if (this.browser) {
-      await this.browser.close();
+    try {
+      if (this.browser) {
+        await this.browser.close();
+      }
+    } catch (error) {
+      console.error('Browser cleanup error:', error);
+    } finally {
       this.browser = null;
-      console.log('Browser closed');
+      this.browserWSEndpoint = null;
     }
   }
 
