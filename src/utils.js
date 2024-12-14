@@ -12,6 +12,7 @@ async function setupBrowser() {
   try {
     const options = {
       headless: !isDev,
+      executablePath: undefined, // Let Puppeteer use its bundled Chromium
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -38,8 +39,7 @@ async function setupBrowser() {
         '--lang=en-US,en'
       ],
       ignoreDefaultArgs: ['--enable-automation'],
-      defaultViewport: { width: 1920, height: 1080 },
-      product: 'chrome'
+      defaultViewport: { width: 1920, height: 1080 }
     };
 
     console.log('Launching browser with options:', {
@@ -47,9 +47,8 @@ async function setupBrowser() {
       args: options.args
     });
 
-    const browser = await (isRender ? 
-      require('puppeteer-core').launch(options) : 
-      puppeteer.launch(options));
+    // Use regular puppeteer instead of puppeteer-core
+    const browser = await puppeteer.launch(options);
     return browser;
   } catch (error) {
     console.error('Browser setup failed:', error);
