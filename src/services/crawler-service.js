@@ -22,10 +22,10 @@ class CrawlerService {
 
   findChromePath() {
     const possiblePaths = [
+      '/usr/bin/google-chrome-stable',
+      '/usr/bin/google-chrome',
       '/usr/bin/chromium',
-      '/usr/bin/chromium-browser',
-      '/usr/lib/chromium/chromium',
-      '/usr/lib/chromium'
+      '/usr/bin/chromium-browser'
     ];
 
     for (const path of possiblePaths) {
@@ -41,13 +41,13 @@ class CrawlerService {
 
     try {
       const { execSync } = require('child_process');
-      const path = execSync('which chromium').toString().trim();
-      if (path) {
-        console.log(`Found browser using which: ${path}`);
-        return path;
+      const output = execSync('which google-chrome-stable').toString().trim();
+      if (output) {
+        console.log(`Found Chrome using which: ${output}`);
+        return output;
       }
     } catch (e) {
-      console.log('Failed to find browser using which');
+      console.log('Failed to find Chrome using which');
     }
 
     return null;
@@ -63,10 +63,11 @@ class CrawlerService {
           console.error('Could not find Chrome installation');
           const { execSync } = require('child_process');
           try {
-            const ls = execSync('ls -la /usr/bin/chrom*').toString();
-            console.log('Chrome binaries found:', ls);
+            console.log('Available Chrome binaries:');
+            console.log(execSync('ls -la /usr/bin/google-chrome*').toString());
+            console.log(execSync('ls -la /usr/bin/chromium*').toString());
           } catch (e) {
-            console.log('No Chrome binaries found in /usr/bin');
+            console.log('No Chrome binaries found');
           }
           throw new Error('Chrome not found');
         }

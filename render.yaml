@@ -6,16 +6,20 @@ services:
       set -ex
       yarn config set network-timeout 300000
       yarn config set legacy-peer-deps true
-      # Install chromium
+      # Install Chrome dependencies
       apt-get update -y
-      apt-get install -y chromium
-      # Check installation
-      echo "Checking chromium installation:"
-      which chromium
-      ls -la /usr/bin/chromium* || true
-      whereis chromium || true
-      find /usr -name "chromium*" -type f 2>/dev/null || true
-      # Setup directories
+      apt-get install -y wget xvfb gnupg fonts-liberation libasound2 libcurl4 libgbm1 libnspr4 libnss3 libu2f-udev xdg-utils
+      # Download and install Chrome
+      wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add -
+      echo "deb http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list
+      apt-get update
+      apt-get install -y google-chrome-stable
+      # Verify Chrome installation
+      echo "Chrome version:"
+      google-chrome-stable --version
+      ls -la /usr/bin/google-chrome*
+      which google-chrome-stable
+      # Setup cache directory
       mkdir -p /opt/render/.cache/puppeteer
       chmod -R 777 /opt/render/.cache/puppeteer
       # Install dependencies and build
