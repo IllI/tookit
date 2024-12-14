@@ -1,9 +1,11 @@
 import { createClient } from '@supabase/supabase-js';
-import puppeteer from 'puppeteer-extra';
+import puppeteer from 'puppeteer';
+import puppeteerExtra from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import { getParser } from './llm-service';
 
-puppeteer.use(StealthPlugin());
+// Configure puppeteer-extra
+puppeteerExtra.use(StealthPlugin());
 
 class CrawlerService {
   constructor() {
@@ -41,7 +43,19 @@ class CrawlerService {
           ignoreDefaultArgs: ['--enable-automation']
         };
 
-        this.browser = await puppeteer.launch(launchOptions);
+        // Use base puppeteer to verify browser exists
+        try {
+          await puppeteer.launch({
+            ...launchOptions,
+            headless: true
+          }).then(browser => browser.close());
+          console.log('Base Puppeteer browser check successful');
+        } catch (error) {
+          console.error('Base Puppeteer browser check failed:', error);
+        }
+
+        // Launch with puppeteer-extra
+        this.browser = await puppeteerExtra.launch(launchOptions);
         const version = await this.browser.version();
         console.log('Browser initialized successfully. Version:', version);
       } catch (error) {
