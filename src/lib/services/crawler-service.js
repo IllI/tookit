@@ -22,22 +22,25 @@ class CrawlerService {
   async initialize() {
     if (!this.browser) {
       console.log('Setting up browser...');
-      const launchOptions = {
-        headless: 'new',
-        args: [
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-dev-shm-usage',
-          '--disable-accelerated-2d-canvas',
-          '--disable-gpu',
-          '--window-size=1920,1080',
-          '--disable-blink-features=AutomationControlled'
-        ],
-        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
-        ignoreDefaultArgs: ['--enable-automation']
-      };
-
       try {
+        const chromiumPath = process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium-browser';
+        console.log('Using chromium path:', chromiumPath);
+        
+        const launchOptions = {
+          headless: 'new',
+          executablePath: chromiumPath,
+          args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-accelerated-2d-canvas',
+            '--disable-gpu',
+            '--window-size=1920,1080',
+            '--disable-blink-features=AutomationControlled'
+          ],
+          ignoreDefaultArgs: ['--enable-automation']
+        };
+
         this.browser = await puppeteer.launch(launchOptions);
         const version = await this.browser.version();
         console.log('Browser initialized successfully. Version:', version);
