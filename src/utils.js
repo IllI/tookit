@@ -38,7 +38,8 @@ async function setupBrowser() {
         '--lang=en-US,en'
       ],
       ignoreDefaultArgs: ['--enable-automation'],
-      defaultViewport: { width: 1920, height: 1080 }
+      defaultViewport: { width: 1920, height: 1080 },
+      product: 'chrome'
     };
 
     console.log('Launching browser with options:', {
@@ -46,7 +47,9 @@ async function setupBrowser() {
       args: options.args
     });
 
-    const browser = await puppeteer.launch(options);
+    const browser = await (isRender ? 
+      require('puppeteer-core').launch(options) : 
+      puppeteer.launch(options));
     return browser;
   } catch (error) {
     console.error('Browser setup failed:', error);
