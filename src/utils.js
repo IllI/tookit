@@ -12,7 +12,8 @@ async function setupBrowser() {
   try {
     const options = {
       headless: !isDev,
-      executablePath: undefined, // Let Puppeteer use its bundled Chromium
+      // Let Puppeteer find its bundled Chromium
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -44,10 +45,10 @@ async function setupBrowser() {
 
     console.log('Launching browser with options:', {
       headless: options.headless,
+      executablePath: options.executablePath,
       args: options.args
     });
 
-    // Use regular puppeteer instead of puppeteer-core
     const browser = await puppeteer.launch(options);
     return browser;
   } catch (error) {
