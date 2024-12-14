@@ -3,24 +3,21 @@ services:
     name: ticket-searcher
     env: node
     buildCommand: |
-      yarn config set network-timeout 300000 && 
-      yarn config set legacy-peer-deps true && 
-      mkdir -p /opt/render/.cache/puppeteer && 
-      chmod -R 777 /opt/render/.cache/puppeteer && 
-      apt-get update -y && 
-      apt-get install -y chromium chromium-browser && 
-      which chromium-browser && 
-      ls -la /usr/bin/chromium* && 
-      yarn install --network-timeout 300000 && 
+      set -e
+      yarn config set network-timeout 300000
+      yarn config set legacy-peer-deps true
+      apt-get update -y
+      apt-get install -y chromium chromium-browser
+      echo "Chrome installation path:" $(which chromium-browser)
+      echo "Chrome version:" $(chromium-browser --version)
+      mkdir -p /opt/render/.cache/puppeteer
+      chmod -R 777 /opt/render/.cache/puppeteer
+      yarn install --network-timeout 300000
       yarn build
     startCommand: yarn start
     nodeVersion: ">=18.0.0"
     envVars:
       - key: NODE_ENV
         value: production
-      - key: RENDER
-        value: "true"
-      - key: PUPPETEER_SKIP_CHROMIUM_DOWNLOAD
-        value: "true"
-      - key: PUPPETEER_EXECUTABLE_PATH
-        value: "/usr/bin/chromium-browser"
+      - key: PUPPETEER_PRODUCT
+        value: chrome

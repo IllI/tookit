@@ -1,11 +1,14 @@
 import { createClient } from '@supabase/supabase-js';
-import puppeteer from 'puppeteer';
-import puppeteerExtra from 'puppeteer-extra';
+import puppeteer from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import { getParser } from './llm-service';
 
-// Configure puppeteer-extra
-puppeteerExtra.use(StealthPlugin());
+const StealthPluginInstance = StealthPlugin();
+StealthPluginInstance.enabledEvasions.delete('user-agent-override');
+puppeteer.use(StealthPluginInstance);
+
+// Override the default browser fetch/launch behavior
+const browserFetcher = puppeteer.createBrowserFetcher();
 
 class CrawlerService {
   constructor() {
@@ -25,39 +28,29 @@ class CrawlerService {
     if (!this.browser) {
       console.log('Setting up browser...');
       try {
-        const chromiumPath = process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium-browser';
-        console.log('Using chromium path:', chromiumPath);
-        
         const launchOptions = {
-          headless: 'new',
-          executablePath: chromiumPath,
+          product: 'chrome',
+          executablePath: '/usr/bin/chromium-browser',
+          ignoreDefaultArgs: ['--enable-automation'],
           args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
             '--disable-accelerated-2d-canvas',
             '--disable-gpu',
+            '--disable-infobars',
             '--window-size=1920,1080',
             '--disable-blink-features=AutomationControlled'
-          ],
-          ignoreDefaultArgs: ['--enable-automation']
+          ]
         };
 
-        // Use base puppeteer to verify browser exists
-        try {
-          await puppeteer.launch({
-            ...launchOptions,
-            headless: true
-          }).then(browser => browser.close());
-          console.log('Base Puppeteer browser check successful');
-        } catch (error) {
-          console.error('Base Puppeteer browser check failed:', error);
-        }
-
-        // Launch with puppeteer-extra
-        this.browser = await puppeteerExtra.launch(launchOptions);
+        console.log('Attempting to launch browser with options:', JSON.stringify(launchOptions, null, 2));
+        this.browser = await puppeteer.launch(launchOptions);
+        const pages = await this.browser.pages();
+        console.log(`Browser launched successfully with ${pages.length} pages`);
+        
         const version = await this.browser.version();
-        console.log('Browser initialized successfully. Version:', version);
+        console.log('Browser version:', version);
       } catch (error) {
         console.error('Browser initialization error:', error);
         throw error;
