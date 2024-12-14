@@ -35,23 +35,25 @@ class CrawlerService {
 
   async initialize() {
     if (!this.browser) {
-      const launchOptions = {
-        //headless: 'new',
-        headless: false,
-        args: [
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-dev-shm-usage',
-          '--disable-accelerated-2d-canvas',
-          '--disable-gpu',
-          '--window-size=1920,1080',
-          '--disable-blink-features=AutomationControlled'
-        ],
-        ignoreDefaultArgs: ['--enable-automation']
-      };
-
-      this.browser = await puppeteer.launch(launchOptions);
-      console.log('Browser initialized');
+      try {
+        this.browser = await puppeteer.launch({
+          headless: 'new',
+          executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
+          args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-gpu',
+            '--no-first-run',
+            '--no-zygote',
+            '--single-process',
+            '--disable-extensions'
+          ]
+        });
+      } catch (error) {
+        console.error('Browser launch error:', error);
+        throw error;
+      }
     }
     return { browser: this.browser };
   }
