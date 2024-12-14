@@ -12,7 +12,6 @@ class CrawlerService {
     this.maxAttempts = 3;
     this.retryDelays = [2000, 3000, 4000];
     
-    // Initialize Supabase client
     this.supabase = createClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL,
       process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
@@ -25,7 +24,6 @@ class CrawlerService {
       console.log('Setting up browser...');
       const launchOptions = {
         headless: 'new',
-        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',
@@ -35,12 +33,14 @@ class CrawlerService {
           '--window-size=1920,1080',
           '--disable-blink-features=AutomationControlled'
         ],
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
         ignoreDefaultArgs: ['--enable-automation']
       };
 
       try {
         this.browser = await puppeteer.launch(launchOptions);
-        console.log('Browser initialized successfully');
+        const version = await this.browser.version();
+        console.log('Browser initialized successfully. Version:', version);
       } catch (error) {
         console.error('Browser initialization error:', error);
         throw error;

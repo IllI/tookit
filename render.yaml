@@ -5,26 +5,20 @@ services:
     buildCommand: |
       yarn config set network-timeout 300000 && 
       yarn config set legacy-peer-deps true && 
-      mkdir -p .cache/puppeteer && 
-      chmod -R 777 .cache/puppeteer && 
-      apt-get update -y && 
-      apt-get install -y wget gnupg ca-certificates fonts-liberation libasound2 libatk-bridge2.0-0 libatk1.0-0 libc6 libcairo2 libcups2 libdbus-1-3 libexpat1 libfontconfig1 libgbm1 libgcc1 libglib2.0-0 libgtk-3-0 libnspr4 libnss3 libpango-1.0-0 libpangocairo-1.0-0 libstdc++6 libx11-6 libx11-xcb1 libxcb1 libxcomposite1 libxcursor1 libxdamage1 libxext6 libxfixes3 libxi6 libxrandr2 libxrender1 libxss1 libxtst6 lsb-release wget xdg-utils && 
-      wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | apt-key add - &&
-      echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list &&
-      apt-get update &&
-      apt-get install -y google-chrome-stable &&
-      yarn install --network-timeout 300000 && 
+      mkdir -p /opt/render/.cache/puppeteer && 
+      chmod -R 777 /opt/render/.cache/puppeteer && 
+      apt-get update && 
+      apt-get install -y chromium fonts-liberation libasound2 libatk-bridge2.0-0 libatk1.0-0 libc6 libcairo2 libcups2 libdbus-1-3 libexpat1 libfontconfig1 libgbm1 libgcc1 libglib2.0-0 libgtk-3-0 libnspr4 libnss3 libpango-1.0-0 libpangocairo-1.0-0 libstdc++6 libx11-6 libx11-xcb1 libxcb1 libxcomposite1 libxcursor1 libxdamage1 libxext6 libxfixes3 libxi6 libxrandr2 libxrender1 libxss1 libxtst6 lsb-release wget xdg-utils && 
+      yarn install && 
       yarn build
     startCommand: yarn start
     nodeVersion: ">=18.0.0"
     envVars:
       - key: NODE_ENV
         value: production
-      - key: RENDER
-        value: "true"
-      - key: PUPPETEER_CACHE_DIR
-        value: ".cache/puppeteer"
       - key: PUPPETEER_SKIP_CHROMIUM_DOWNLOAD
         value: "true"
       - key: PUPPETEER_EXECUTABLE_PATH
-        value: "/usr/bin/google-chrome-stable"
+        value: "/usr/bin/chromium"
+      - key: PUPPETEER_CACHE_DIR
+        value: "/opt/render/.cache/puppeteer"
