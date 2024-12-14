@@ -10,12 +10,9 @@ const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 
 async function setupBrowser() {
   try {
-    // Add stealth plugin to puppeteer
-    const puppeteerExtra = addExtra(puppeteer);
-    puppeteerExtra.use(StealthPlugin());
-
-    const launchOptions = {
-      headless: "new",
+    const options = {
+      headless: !isDev,
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -25,56 +22,35 @@ async function setupBrowser() {
         '--window-size=1920,1080',
         '--disable-web-security',
         '--disable-features=IsolateOrigins,site-per-process',
-        '--allow-running-insecure-content',
-        '--disable-blink-features=AutomationControlled',
+        '--disable-site-isolation-trials',
+        '--disable-breakpad',
         '--disable-sync',
+        '--no-first-run',
+        '--no-experiments',
+        '--no-default-browser-check',
+        '--disable-infobars',
+        '--disable-translate',
         '--disable-background-timer-throttling',
         '--disable-backgrounding-occluded-windows',
         '--disable-renderer-backgrounding',
         '--user-agent=' + USER_AGENT,
         '--enable-javascript',
         '--disable-notifications',
-        '--lang=en-US,en',
-        '--start-maximized'
+        '--lang=en-US,en'
       ],
       ignoreDefaultArgs: ['--enable-automation'],
-      defaultViewport: null
+      defaultViewport: { width: 1920, height: 1080 }
     };
 
-    console.log('Launching browser with options:', {
-      isDev,
-      isRender,
-      isDebug,
-      cacheDir: process.env.PUPPETEER_CACHE_DIR,
-      platform: process.platform,
-      env: {
-        NODE_ENV: process.env.NODE_ENV,
-        RENDER: process.env.RENDER
-      }
+    console.log('Browser launch options:', {
+      executablePath: options.executablePath,
+      env: process.env.PUPPETEER_EXECUTABLE_PATH
     });
 
-    const browser = await puppeteerExtra.launch(launchOptions);
-    console.log('Browser launched successfully in', isDebug ? 'visible' : 'headless', 'mode');
-    
-    // Log browser version for debugging
-    const version = await browser.version();
-    console.log('Browser version:', version);
-
+    const browser = await puppeteer.launch(options);
     return browser;
-
   } catch (error) {
-    console.error('Error setting up browser:', error);
-    console.error('Launch options:', {
-      isDev,
-      isRender,
-      isDebug,
-      platform: process.platform,
-      env: {
-        NODE_ENV: process.env.NODE_ENV,
-        RENDER: process.env.RENDER,
-        PUPPETEER_CACHE_DIR: process.env.PUPPETEER_CACHE_DIR
-      }
-    });
+    console.error('Browser setup failed:', error);
     throw error;
   }
 }
