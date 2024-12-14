@@ -15,7 +15,7 @@ class StubHubSearcher {
 
       const result = await crawlerService.crawlPage({
         url: searchUrl,
-        waitForSelector: 'body'  // Wait for any content to load
+        waitForSelector: 'body'
       });
 
       const events = result?.data?.events || [];

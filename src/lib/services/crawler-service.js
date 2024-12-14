@@ -21,31 +21,25 @@ class CrawlerService {
       console.log('Setting up browser...');
       
       try {
-        const browserFetcher = new core.BrowserFetcher();
-        console.log('Using browserFetcher to locate chrome...');
+        console.log('Launch options for browser:', {
+          executablePath: '/usr/bin/chromium-browser',
+          headless: true,
+          args: ['--no-sandbox', '--disable-setuid-sandbox']
+        });
         
-        const launchOptions = {
-          defaultViewport: { width: 1920, height: 1080 },
+        this.browser = await core.launch({
           executablePath: '/usr/bin/chromium-browser',
           headless: true,
           args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
-            '--disable-gpu',
-            '--window-size=1920,1080'
+            '--disable-gpu'
           ]
-        };
-
-        console.log('Launch options:', JSON.stringify(launchOptions, null, 2));
-        this.browser = await core.launch(launchOptions);
+        });
         
         const version = await this.browser.version();
         console.log('Browser launched successfully. Version:', version);
-        
-        const pages = await this.browser.pages();
-        console.log(`Browser has ${pages.length} pages open`);
         
       } catch (error) {
         console.error('Browser initialization error with full details:', {
@@ -64,5 +58,33 @@ class CrawlerService {
     return { browser: this.browser };
   }
 
-  // ... rest of the service implementation ...
+  async crawlPage({ url, waitForSelector }) {
+    const { browser } = await this.initialize();
+    const page = await browser.newPage();
+    
+    try {
+      await page.goto(url, { waitUntil: 'networkidle0' });
+      if (waitForSelector) {
+        await page.waitForSelector(waitForSelector);
+      }
+      
+      const content = await page.content();
+      const parsedContent = await this.parser.parseContent(content, url);
+      
+      return {
+        success: true,
+        data: parsedContent
+      };
+    } catch (error) {
+      console.error('Error crawling page:', error);
+      return {
+        success: false,
+        error: error.message
+      };
+    } finally {
+      await page.close();
+    }
+  }
 }
+
+export const crawlerService = new CrawlerService();
