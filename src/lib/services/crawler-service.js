@@ -1,14 +1,13 @@
 import { createClient } from '@supabase/supabase-js';
-import puppeteer from 'puppeteer-extra';
+import { execSync } from 'child_process';
+import puppeteerCore from 'puppeteer-core';
+import puppeteerExtra from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import { getParser } from './llm-service';
 
-const StealthPluginInstance = StealthPlugin();
-StealthPluginInstance.enabledEvasions.delete('user-agent-override');
-puppeteer.use(StealthPluginInstance);
-
-// Override the default browser fetch/launch behavior
-const browserFetcher = puppeteer.createBrowserFetcher();
+// Configure puppeteer-extra with puppeteer-core
+puppeteerExtra.use(puppeteerCore);
+puppeteerExtra.use(StealthPlugin());
 
 class CrawlerService {
   constructor() {
@@ -24,13 +23,52 @@ class CrawlerService {
     this.searchService = null;
   }
 
+  findChromePath() {
+    try {
+      // Try different possible paths
+      const paths = [
+        '/usr/bin/chromium-browser',
+        '/usr/bin/chromium',
+        '/usr/bin/chrome',
+        '/usr/bin/google-chrome'
+      ];
+
+      for (const path of paths) {
+        try {
+          execSync(`test -f ${path}`);
+          console.log(`Found browser at: ${path}`);
+          return path;
+        } catch (e) {
+          console.log(`Browser not found at: ${path}`);
+        }
+      }
+
+      // If none found, try which command
+      const chromiumPath = execSync('which chromium-browser').toString().trim();
+      if (chromiumPath) {
+        console.log(`Found browser using which: ${chromiumPath}`);
+        return chromiumPath;
+      }
+    } catch (error) {
+      console.error('Error finding Chrome path:', error);
+    }
+    return null;
+  }
+
   async initialize() {
     if (!this.browser) {
       console.log('Setting up browser...');
       try {
+        const chromePath = this.findChromePath();
+        if (!chromePath) {
+          throw new Error('Could not find Chrome installation');
+        }
+
+        console.log('Using Chrome path:', chromePath);
+        
         const launchOptions = {
-          product: 'chrome',
-          executablePath: '/usr/bin/chromium-browser',
+          headless: 'new',
+          executablePath: chromePath,
           ignoreDefaultArgs: ['--enable-automation'],
           args: [
             '--no-sandbox',
@@ -44,11 +82,19 @@ class CrawlerService {
           ]
         };
 
-        console.log('Attempting to launch browser with options:', JSON.stringify(launchOptions, null, 2));
-        this.browser = await puppeteer.launch(launchOptions);
-        const pages = await this.browser.pages();
-        console.log(`Browser launched successfully with ${pages.length} pages`);
+        console.log('Launching browser with options:', JSON.stringify(launchOptions, null, 2));
         
+        // Try puppeteer-core first
+        try {
+          this.browser = await puppeteerCore.launch(launchOptions);
+          console.log('Launched with puppeteer-core');
+        } catch (coreError) {
+          console.error('puppeteer-core launch failed:', coreError);
+          console.log('Trying puppeteer-extra...');
+          this.browser = await puppeteerExtra.launch(launchOptions);
+          console.log('Launched with puppeteer-extra');
+        }
+
         const version = await this.browser.version();
         console.log('Browser version:', version);
       } catch (error) {
