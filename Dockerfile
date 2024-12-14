@@ -1,6 +1,6 @@
 FROM node:18-slim
 
-# Install dependencies for Chrome
+# Install Chrome dependencies and Chrome itself
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
@@ -30,6 +30,11 @@ RUN apt-get update && apt-get install -y \
     libgbm1 \
     libasound2 \
     fonts-liberation \
+    xvfb \
+    && wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add - \
+    && sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list' \
+    && apt-get update \
+    && apt-get install -y google-chrome-stable \
     && rm -rf /var/lib/apt/lists/*
 
 # Set up working directory
@@ -50,9 +55,10 @@ RUN npm run build
 # Expose the port the app runs on
 EXPOSE 3000
 
-# Start the application
-CMD ["npm", "start"] 
-
 # Set environment variables for Puppeteer
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
-ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome-stable 
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome-stable
+ENV DISPLAY=:99
+
+# Start Xvfb, Chrome, and the application
+CMD Xvfb :99 -screen 0 1024x768x16 & npm start
