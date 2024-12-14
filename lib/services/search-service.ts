@@ -259,4 +259,4 @@ export class SearchService extends EventEmitter {
     
     return events;
   }
-} 
+}
