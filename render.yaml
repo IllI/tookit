@@ -6,16 +6,19 @@ services:
       set -ex
       yarn config set network-timeout 300000
       yarn config set legacy-peer-deps true
+      # Install chromium
       apt-get update -y
-      apt-get install -y chromium chromium-browser
-      echo "Chrome installation check:"
-      which chromium-browser
-      chromium-browser --version || true
-      ls -la /usr/bin/chrom* || true
-      file /usr/bin/chromium-browser || true
-      ldd /usr/bin/chromium-browser || true
+      apt-get install -y chromium
+      # Check installation
+      echo "Checking chromium installation:"
+      which chromium
+      ls -la /usr/bin/chromium* || true
+      whereis chromium || true
+      find /usr -name "chromium*" -type f 2>/dev/null || true
+      # Setup directories
       mkdir -p /opt/render/.cache/puppeteer
       chmod -R 777 /opt/render/.cache/puppeteer
+      # Install dependencies and build
       yarn install --network-timeout 300000
       yarn build
     startCommand: yarn start

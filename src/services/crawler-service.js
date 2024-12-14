@@ -20,27 +20,70 @@ class CrawlerService {
     this.searchService = service;
   }
 
+  findChromePath() {
+    const possiblePaths = [
+      '/usr/bin/chromium',
+      '/usr/bin/chromium-browser',
+      '/usr/lib/chromium/chromium',
+      '/usr/lib/chromium'
+    ];
+
+    for (const path of possiblePaths) {
+      try {
+        const { execSync } = require('child_process');
+        execSync(`test -f ${path}`);
+        console.log(`Found browser at: ${path}`);
+        return path;
+      } catch (e) {
+        console.log(`Browser not found at: ${path}`);
+      }
+    }
+
+    try {
+      const { execSync } = require('child_process');
+      const path = execSync('which chromium').toString().trim();
+      if (path) {
+        console.log(`Found browser using which: ${path}`);
+        return path;
+      }
+    } catch (e) {
+      console.log('Failed to find browser using which');
+    }
+
+    return null;
+  }
+
   async initialize() {
     if (!this.browser) {
       console.log('Setting up browser...');
       
       try {
-        console.log('Launch options for browser:', {
-          executablePath: '/usr/bin/chromium-browser',
-          headless: true,
-          args: ['--no-sandbox', '--disable-setuid-sandbox']
-        });
-        
-        this.browser = await core.launch({
-          executablePath: '/usr/bin/chromium-browser',
-          headless: true,
+        const chromePath = this.findChromePath();
+        if (!chromePath) {
+          console.error('Could not find Chrome installation');
+          const { execSync } = require('child_process');
+          try {
+            const ls = execSync('ls -la /usr/bin/chrom*').toString();
+            console.log('Chrome binaries found:', ls);
+          } catch (e) {
+            console.log('No Chrome binaries found in /usr/bin');
+          }
+          throw new Error('Chrome not found');
+        }
+
+        const launchOptions = {
+          executablePath: chromePath,
+          headless: 'new',
           args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
             '--disable-gpu'
           ]
-        });
+        };
+
+        console.log('Launching browser with options:', JSON.stringify(launchOptions, null, 2));
+        this.browser = await core.launch(launchOptions);
         
         const version = await this.browser.version();
         console.log('Browser launched successfully. Version:', version);
