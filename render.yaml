@@ -7,36 +7,30 @@ services:
       yarn config set network-timeout 300000
       yarn config set legacy-peer-deps true
       
-      # Create Chrome directory in src folder
-      mkdir -p chrome
-      cd chrome
-      
-      # Install dependencies
+      # Install Chrome
       apt-get update
-      apt-get install -y wget unzip fonts-liberation libappindicator3-1 libasound2 libatk-bridge2.0-0 \
-        libatk1.0-0 libc6 libcairo2 libcups2 libdbus-1-3 libexpat1 libfontconfig1 libgbm1 libgcc1 \
-        libglib2.0-0 libgtk-3-0 libnspr4 libnss3 libpango-1.0-0 libpangocairo-1.0-0 libstdc++6 \
-        libx11-6 libx11-xcb1 libxcb1 libxcomposite1 libxcursor1 libxdamage1 libxext6 libxfixes3 \
-        libxi6 libxrandr2 libxrender1 libxss1 libxtst6 lsb-release xdg-utils
+      apt-get install -y chromium
       
-      # Download and extract Chrome
-      wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-      ar x google-chrome-stable_current_amd64.deb
-      tar xf data.tar.xz
+      # Find and verify Chrome path
+      CHROME_PATH=$(which chromium)
+      if [ ! -f "$CHROME_PATH" ]; then
+        CHROME_PATH=$(which chromium-browser)
+      fi
       
-      # Make Chrome executable
-      chmod +x usr/bin/google-chrome-stable
+      if [ ! -f "$CHROME_PATH" ]; then
+        echo "Chrome not found! Trying alternative installation..."
+        apt-get install -y wget gnupg
+        wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add -
+        echo "deb http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list
+        apt-get update
+        apt-get install -y google-chrome-stable
+        CHROME_PATH=$(which google-chrome-stable)
+      fi
       
-      # Verify Chrome installation
-      echo "Chrome installation path:"
-      pwd
-      echo "Chrome files:"
-      ls -la usr/bin/google-chrome*
-      echo "Chrome version:"
-      ./usr/bin/google-chrome-stable --version || true
-      
-      # Return to project directory
-      cd ..
+      # Verify installation and save path
+      echo "Chrome path: $CHROME_PATH"
+      $CHROME_PATH --version
+      echo "CHROME_EXECUTABLE_PATH=$CHROME_PATH" >> .env
       
       # Install dependencies and build
       yarn install --network-timeout 300000
@@ -46,5 +40,3 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
-      - key: CHROME_PATH
-        value: "/opt/render/project/src/chrome/usr/bin/google-chrome-stable"

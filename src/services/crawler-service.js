@@ -1,7 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
 import core from 'puppeteer-core';
 import { getParser } from './llm-service';
-import path from 'path';
 import { execSync } from 'child_process';
 
 class CrawlerService {
@@ -39,25 +38,21 @@ class CrawlerService {
       console.log('Setting up browser...');
       
       try {
-        // Get project root directory
-        const projectDir = process.cwd();
-        console.log('Project directory:', projectDir);
+        // Use path from environment variable
+        const chromePath = process.env.CHROME_EXECUTABLE_PATH;
+        console.log(`Using Chrome path from env: ${chromePath}`);
         
-        // Default to Chrome in our project directory
-        const chromePath = path.join(projectDir, 'chrome/usr/bin/google-chrome-stable');
-        console.log(`Checking Chrome at path: ${chromePath}`);
-        
-        if (!this.verifyChromePath(chromePath)) {
+        if (!chromePath || !this.verifyChromePath(chromePath)) {
           console.error('Chrome not found at configured path');
           try {
-            console.log('Project directory contents:');
-            console.log(execSync(`ls -la ${projectDir}/chrome`).toString());
-            console.log('\nChrome directory contents:');
-            console.log(execSync(`ls -la ${projectDir}/chrome/usr/bin`).toString());
+            console.log('Available Chrome installations:');
+            console.log(execSync('which chromium chromium-browser google-chrome-stable 2>/dev/null || true').toString());
+            console.log('\nSystem PATH:');
+            console.log(process.env.PATH);
           } catch (e) {
-            console.error('Error checking directories:', e.message);
+            console.error('Error checking Chrome installations:', e.message);
           }
-          throw new Error(`Chrome not found at ${chromePath}`);
+          throw new Error('Chrome not found');
         }
 
         const launchOptions = {
@@ -68,9 +63,7 @@ class CrawlerService {
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
             '--disable-gpu',
-            '--single-process',
-            '--disable-extensions',
-            '--disable-software-rasterizer'
+            '--single-process'
           ]
         };
 
