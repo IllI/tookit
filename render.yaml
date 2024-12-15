@@ -7,10 +7,9 @@ services:
       yarn config set network-timeout 300000
       yarn config set legacy-peer-deps true
       
-      # Create directories
-      mkdir -p /opt/chrome
-      mkdir -p /opt/render/.cache/puppeteer
-      chmod -R 777 /opt/render/.cache/puppeteer
+      # Create Chrome directory in project folder
+      mkdir -p /opt/render/project/chrome
+      cd /opt/render/project/chrome
       
       # Install dependencies
       apt-get update
@@ -20,21 +19,21 @@ services:
         libx11-6 libx11-xcb1 libxcb1 libxcomposite1 libxcursor1 libxdamage1 libxext6 libxfixes3 \
         libxi6 libxrandr2 libxrender1 libxss1 libxtst6 lsb-release xdg-utils
       
-      # Download and install Chrome
-      cd /opt/chrome
+      # Download and extract Chrome
       wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
       ar x google-chrome-stable_current_amd64.deb
       tar xf data.tar.xz
-      cp -r usr/bin/google-chrome-stable /usr/bin/
-      cp -r usr/share/applications/google-chrome.desktop /usr/share/applications/
-      cp -r usr/share/doc/google-chrome-stable /usr/share/doc/
-      cp -r usr/share/man/man1/google-chrome-stable.1.gz /usr/share/man/man1/
-      cd -
+      
+      # Make Chrome executable
+      chmod +x usr/bin/google-chrome-stable
       
       # Verify Chrome installation
       echo "Checking Chrome installation:"
-      /usr/bin/google-chrome-stable --version || true
-      ls -la /usr/bin/google-chrome* || true
+      ./usr/bin/google-chrome-stable --version || true
+      ls -la usr/bin/google-chrome* || true
+      
+      # Return to project directory
+      cd /opt/render/project/src
       
       # Install dependencies and build
       yarn install --network-timeout 300000
@@ -44,3 +43,5 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
+      - key: CHROME_PATH
+        value: "/opt/render/project/chrome/usr/bin/google-chrome-stable"

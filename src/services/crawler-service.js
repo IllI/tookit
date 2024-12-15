@@ -2,8 +2,6 @@ import { createClient } from '@supabase/supabase-js';
 import core from 'puppeteer-core';
 import { getParser } from './llm-service';
 
-const DEFAULT_CHROME_PATH = '/usr/bin/google-chrome-stable';
-
 class CrawlerService {
   constructor() {
     this.browser = null;
@@ -40,25 +38,18 @@ class CrawlerService {
       console.log('Setting up browser...');
       
       try {
-        // First try the default path
-        let chromePath = DEFAULT_CHROME_PATH;
-        let chromeFound = this.verifyChromePath(chromePath);
+        const chromePath = process.env.CHROME_PATH || '/opt/render/project/chrome/usr/bin/google-chrome-stable';
+        console.log(`Checking Chrome at path: ${chromePath}`);
         
-        if (!chromeFound) {
-          console.error('Chrome not found at default location');
-          const { execSync } = require('child_process');
-          
+        if (!this.verifyChromePath(chromePath)) {
+          console.error('Chrome not found at configured path');
           try {
-            console.log('Chrome package files:');
-            console.log(execSync('ls -laR /opt/chrome').toString());
-            console.log('\nChrome binaries:');
-            console.log(execSync('find /usr/bin -name "*chrome*"').toString());
-            console.log('\nSearch for Chrome:');
-            console.log(execSync('find / -name "*chrome*" -type f 2>/dev/null').toString());
+            const { execSync } = require('child_process');
+            console.log('Project directory contents:');
+            console.log(execSync('ls -laR /opt/render/project/chrome').toString());
           } catch (e) {
-            console.error('Error checking Chrome installation:', e.message);
+            console.error('Error checking project directory:', e.message);
           }
-          
           throw new Error(`Chrome not found at ${chromePath}`);
         }
 
@@ -70,7 +61,9 @@ class CrawlerService {
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
             '--disable-gpu',
-            '--single-process'
+            '--single-process',
+            '--disable-extensions',
+            '--disable-software-rasterizer'
           ]
         };
 
