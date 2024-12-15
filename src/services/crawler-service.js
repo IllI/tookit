@@ -33,22 +33,47 @@ class CrawlerService {
     }
   }
 
+  findChromePath() {
+    // First check environment variable
+    const envPath = process.env.CHROME_EXECUTABLE_PATH;
+    if (envPath && this.verifyChromePath(envPath)) {
+      return envPath;
+    }
+
+    // Then try standard locations
+    const paths = [
+      '/usr/bin/google-chrome-stable',
+      '/usr/bin/google-chrome',
+      '/usr/bin/chromium',
+      '/usr/bin/chromium-browser'
+    ];
+
+    for (const path of paths) {
+      if (this.verifyChromePath(path)) {
+        return path;
+      }
+    }
+
+    return null;
+  }
+
   async initialize() {
     if (!this.browser) {
       console.log('Setting up browser...');
+      console.log('Environment variables:', {
+        CHROME_EXECUTABLE_PATH: process.env.CHROME_EXECUTABLE_PATH,
+        PATH: process.env.PATH
+      });
       
       try {
-        // Use path from environment variable
-        const chromePath = process.env.CHROME_EXECUTABLE_PATH;
-        console.log(`Using Chrome path from env: ${chromePath}`);
-        
-        if (!chromePath || !this.verifyChromePath(chromePath)) {
-          console.error('Chrome not found at configured path');
+        const chromePath = this.findChromePath();
+        if (!chromePath) {
+          console.error('Chrome not found in any location');
           try {
             console.log('Available Chrome installations:');
-            console.log(execSync('which chromium chromium-browser google-chrome-stable 2>/dev/null || true').toString());
-            console.log('\nSystem PATH:');
-            console.log(process.env.PATH);
+            console.log(execSync('which google-chrome-stable google-chrome chromium chromium-browser 2>/dev/null || true').toString());
+            console.log('\nFile listing of /usr/bin:');
+            console.log(execSync('ls -la /usr/bin/google-chrome* /usr/bin/chromium* 2>/dev/null || true').toString());
           } catch (e) {
             console.error('Error checking Chrome installations:', e.message);
           }

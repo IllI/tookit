@@ -7,30 +7,18 @@ services:
       yarn config set network-timeout 300000
       yarn config set legacy-peer-deps true
       
-      # Install Chrome
+      # Install Chrome dependencies and Chrome
       apt-get update
-      apt-get install -y chromium
+      apt-get install -y wget gnupg
+      wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add -
+      echo "deb http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list
+      apt-get update
+      apt-get install -y google-chrome-stable
       
-      # Find and verify Chrome path
-      CHROME_PATH=$(which chromium)
-      if [ ! -f "$CHROME_PATH" ]; then
-        CHROME_PATH=$(which chromium-browser)
-      fi
-      
-      if [ ! -f "$CHROME_PATH" ]; then
-        echo "Chrome not found! Trying alternative installation..."
-        apt-get install -y wget gnupg
-        wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add -
-        echo "deb http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list
-        apt-get update
-        apt-get install -y google-chrome-stable
-        CHROME_PATH=$(which google-chrome-stable)
-      fi
-      
-      # Verify installation and save path
-      echo "Chrome path: $CHROME_PATH"
-      $CHROME_PATH --version
-      echo "CHROME_EXECUTABLE_PATH=$CHROME_PATH" >> .env
+      # Save Chrome path to environment
+      FOUND_CHROME_PATH=$(which google-chrome-stable)
+      echo "Found Chrome at: ${FOUND_CHROME_PATH}"
+      echo "export CHROME_EXECUTABLE_PATH=${FOUND_CHROME_PATH}" >> ~/.bashrc
       
       # Install dependencies and build
       yarn install --network-timeout 300000
@@ -40,3 +28,7 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
+      - key: CHROME_EXECUTABLE_PATH
+        value: "/usr/bin/google-chrome-stable"
+      - key: PATH
+        value: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin:/usr/bin/google-chrome-stable"
