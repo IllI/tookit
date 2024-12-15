@@ -1,6 +1,8 @@
 import { createClient } from '@supabase/supabase-js';
 import core from 'puppeteer-core';
 import { getParser } from './llm-service';
+import path from 'path';
+import { execSync } from 'child_process';
 
 class CrawlerService {
   constructor() {
@@ -22,7 +24,6 @@ class CrawlerService {
 
   verifyChromePath(path) {
     try {
-      const { execSync } = require('child_process');
       execSync(`test -f ${path}`);
       const version = execSync(`${path} --version 2>/dev/null`).toString();
       console.log(`Verified Chrome at ${path}: ${version}`);
@@ -38,17 +39,23 @@ class CrawlerService {
       console.log('Setting up browser...');
       
       try {
-        const chromePath = process.env.CHROME_PATH || '/opt/render/project/chrome/usr/bin/google-chrome-stable';
+        // Get project root directory
+        const projectDir = process.cwd();
+        console.log('Project directory:', projectDir);
+        
+        // Default to Chrome in our project directory
+        const chromePath = path.join(projectDir, 'chrome/usr/bin/google-chrome-stable');
         console.log(`Checking Chrome at path: ${chromePath}`);
         
         if (!this.verifyChromePath(chromePath)) {
           console.error('Chrome not found at configured path');
           try {
-            const { execSync } = require('child_process');
             console.log('Project directory contents:');
-            console.log(execSync('ls -laR /opt/render/project/chrome').toString());
+            console.log(execSync(`ls -la ${projectDir}/chrome`).toString());
+            console.log('\nChrome directory contents:');
+            console.log(execSync(`ls -la ${projectDir}/chrome/usr/bin`).toString());
           } catch (e) {
-            console.error('Error checking project directory:', e.message);
+            console.error('Error checking directories:', e.message);
           }
           throw new Error(`Chrome not found at ${chromePath}`);
         }

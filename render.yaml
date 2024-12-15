@@ -7,9 +7,9 @@ services:
       yarn config set network-timeout 300000
       yarn config set legacy-peer-deps true
       
-      # Create Chrome directory in project folder
-      mkdir -p /opt/render/project/chrome
-      cd /opt/render/project/chrome
+      # Create Chrome directory in src folder
+      mkdir -p chrome
+      cd chrome
       
       # Install dependencies
       apt-get update
@@ -28,12 +28,15 @@ services:
       chmod +x usr/bin/google-chrome-stable
       
       # Verify Chrome installation
-      echo "Checking Chrome installation:"
+      echo "Chrome installation path:"
+      pwd
+      echo "Chrome files:"
+      ls -la usr/bin/google-chrome*
+      echo "Chrome version:"
       ./usr/bin/google-chrome-stable --version || true
-      ls -la usr/bin/google-chrome* || true
       
       # Return to project directory
-      cd /opt/render/project/src
+      cd ..
       
       # Install dependencies and build
       yarn install --network-timeout 300000
@@ -44,4 +47,4 @@ services:
       - key: NODE_ENV
         value: production
       - key: CHROME_PATH
-        value: "/opt/render/project/chrome/usr/bin/google-chrome-stable"
+        value: "/opt/render/project/src/chrome/usr/bin/google-chrome-stable"
