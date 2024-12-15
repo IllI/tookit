@@ -40,13 +40,44 @@ class CrawlerService {
       console.log('Setting up browser...');
       
       try {
-        // Verify Chrome installation
-        if (!this.verifyChromePath(DEFAULT_CHROME_PATH)) {
-          throw new Error(`Chrome not found at ${DEFAULT_CHROME_PATH}`);
+        // First try the default path
+        let chromePath = DEFAULT_CHROME_PATH;
+        let chromeFound = this.verifyChromePath(chromePath);
+        
+        // If not found, try some alternatives
+        if (!chromeFound) {
+          const alternatePaths = [
+            '/usr/bin/google-chrome',
+            '/usr/bin/chromium',
+            '/usr/bin/chromium-browser'
+          ];
+          
+          for (const path of alternatePaths) {
+            if (this.verifyChromePath(path)) {
+              chromePath = path;
+              chromeFound = true;
+              break;
+            }
+          }
+        }
+
+        if (!chromeFound) {
+          // Try to locate Chrome
+          try {
+            const { execSync } = require('child_process');
+            console.log('System information:');
+            console.log('Installed packages:');
+            console.log(execSync('apt list --installed | grep -i chrome').toString());
+            console.log('Binary locations:');
+            console.log(execSync('find /usr/bin -name "*chrome*"').toString());
+          } catch (e) {
+            console.error('Failed to get system information:', e.message);
+          }
+          throw new Error('Chrome not found');
         }
 
         const launchOptions = {
-          executablePath: DEFAULT_CHROME_PATH,
+          executablePath: chromePath,
           headless: 'new',
           args: [
             '--no-sandbox',
@@ -57,27 +88,13 @@ class CrawlerService {
         };
 
         console.log('Launching browser with options:', JSON.stringify(launchOptions, null, 2));
-        
         this.browser = await core.launch(launchOptions);
-        console.log('Browser launched successfully');
         
         const version = await this.browser.version();
-        console.log('Browser version:', version);
+        console.log('Browser launched successfully. Version:', version);
         
       } catch (error) {
         console.error('Browser initialization error:', error);
-        const { execSync } = require('child_process');
-        try {
-          console.log('System information:');
-          console.log('Chrome package status:');
-          console.log(execSync('dpkg -l | grep -i chrome').toString());
-          console.log('Chrome binary location:');
-          console.log(execSync('which google-chrome-stable').toString());
-          console.log('Chrome version:');
-          console.log(execSync('google-chrome-stable --version').toString());
-        } catch (e) {
-          console.error('Failed to get system information:', e);
-        }
         throw error;
       }
     }

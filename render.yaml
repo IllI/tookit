@@ -7,18 +7,23 @@ services:
       yarn config set network-timeout 300000
       yarn config set legacy-peer-deps true
       
-      # Install dependencies
-      apt-get update
-      apt-get install -y ca-certificates fonts-liberation unzip curl gnupg
+      # Install dependencies with sudo
+      sudo apt-get update
+      sudo apt-get install -y ca-certificates fonts-liberation unzip curl gnupg
       
-      # Install Chrome
-      curl -sS -o - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add -
-      echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list
-      apt-get -y update && apt-get -y install google-chrome-stable
+      # Install Chrome with sudo
+      sudo curl -sS -o - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+      sudo echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
+      sudo apt-get -y update
+      sudo apt-get -y install google-chrome-stable
       
       # Verify installation
-      google-chrome-stable --version
-      which google-chrome-stable
+      sudo google-chrome-stable --version
+      ls -la /usr/bin/google-chrome*
+      
+      # Create cache directory
+      sudo mkdir -p /opt/render/.cache/puppeteer
+      sudo chmod -R 777 /opt/render/.cache/puppeteer
       
       # Install dependencies and build
       yarn install --network-timeout 300000
