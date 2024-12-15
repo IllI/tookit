@@ -26,7 +26,7 @@ class CrawlerService {
     try {
       const { execSync } = require('child_process');
       execSync(`test -f ${path}`);
-      const version = execSync(`${path} --version`).toString();
+      const version = execSync(`${path} --version 2>/dev/null`).toString();
       console.log(`Verified Chrome at ${path}: ${version}`);
       return true;
     } catch (e) {
@@ -44,36 +44,22 @@ class CrawlerService {
         let chromePath = DEFAULT_CHROME_PATH;
         let chromeFound = this.verifyChromePath(chromePath);
         
-        // If not found, try some alternatives
         if (!chromeFound) {
-          const alternatePaths = [
-            '/usr/bin/google-chrome',
-            '/usr/bin/chromium',
-            '/usr/bin/chromium-browser'
-          ];
+          console.error('Chrome not found at default location');
+          const { execSync } = require('child_process');
           
-          for (const path of alternatePaths) {
-            if (this.verifyChromePath(path)) {
-              chromePath = path;
-              chromeFound = true;
-              break;
-            }
-          }
-        }
-
-        if (!chromeFound) {
-          // Try to locate Chrome
           try {
-            const { execSync } = require('child_process');
-            console.log('System information:');
-            console.log('Installed packages:');
-            console.log(execSync('apt list --installed | grep -i chrome').toString());
-            console.log('Binary locations:');
+            console.log('Chrome package files:');
+            console.log(execSync('ls -laR /opt/chrome').toString());
+            console.log('\nChrome binaries:');
             console.log(execSync('find /usr/bin -name "*chrome*"').toString());
+            console.log('\nSearch for Chrome:');
+            console.log(execSync('find / -name "*chrome*" -type f 2>/dev/null').toString());
           } catch (e) {
-            console.error('Failed to get system information:', e.message);
+            console.error('Error checking Chrome installation:', e.message);
           }
-          throw new Error('Chrome not found');
+          
+          throw new Error(`Chrome not found at ${chromePath}`);
         }
 
         const launchOptions = {
@@ -83,7 +69,8 @@ class CrawlerService {
             '--no-sandbox',
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
-            '--disable-gpu'
+            '--disable-gpu',
+            '--single-process'
           ]
         };
 

@@ -7,23 +7,34 @@ services:
       yarn config set network-timeout 300000
       yarn config set legacy-peer-deps true
       
-      # Install dependencies with sudo
-      sudo apt-get update
-      sudo apt-get install -y ca-certificates fonts-liberation unzip curl gnupg
+      # Create directories
+      mkdir -p /opt/chrome
+      mkdir -p /opt/render/.cache/puppeteer
+      chmod -R 777 /opt/render/.cache/puppeteer
       
-      # Install Chrome with sudo
-      sudo curl -sS -o - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
-      sudo echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
-      sudo apt-get -y update
-      sudo apt-get -y install google-chrome-stable
+      # Install dependencies
+      apt-get update
+      apt-get install -y wget unzip fonts-liberation libappindicator3-1 libasound2 libatk-bridge2.0-0 \
+        libatk1.0-0 libc6 libcairo2 libcups2 libdbus-1-3 libexpat1 libfontconfig1 libgbm1 libgcc1 \
+        libglib2.0-0 libgtk-3-0 libnspr4 libnss3 libpango-1.0-0 libpangocairo-1.0-0 libstdc++6 \
+        libx11-6 libx11-xcb1 libxcb1 libxcomposite1 libxcursor1 libxdamage1 libxext6 libxfixes3 \
+        libxi6 libxrandr2 libxrender1 libxss1 libxtst6 lsb-release xdg-utils
       
-      # Verify installation
-      sudo google-chrome-stable --version
-      ls -la /usr/bin/google-chrome*
+      # Download and install Chrome
+      cd /opt/chrome
+      wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+      ar x google-chrome-stable_current_amd64.deb
+      tar xf data.tar.xz
+      cp -r usr/bin/google-chrome-stable /usr/bin/
+      cp -r usr/share/applications/google-chrome.desktop /usr/share/applications/
+      cp -r usr/share/doc/google-chrome-stable /usr/share/doc/
+      cp -r usr/share/man/man1/google-chrome-stable.1.gz /usr/share/man/man1/
+      cd -
       
-      # Create cache directory
-      sudo mkdir -p /opt/render/.cache/puppeteer
-      sudo chmod -R 777 /opt/render/.cache/puppeteer
+      # Verify Chrome installation
+      echo "Checking Chrome installation:"
+      /usr/bin/google-chrome-stable --version || true
+      ls -la /usr/bin/google-chrome* || true
       
       # Install dependencies and build
       yarn install --network-timeout 300000
