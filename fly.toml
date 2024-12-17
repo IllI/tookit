@@ -7,7 +7,7 @@ app = "ticket-searcher"
   PORT = "3000"
   NODE_ENV = "production"
   PUPPETEER_SKIP_CHROMIUM_DOWNLOAD = "true"
-  PUPPETEER_EXECUTABLE_PATH = "/usr/bin/google-chrome-stable"
+  PUPPETEER_EXECUTABLE_PATH = "/usr/bin/chromium"
 
 [http_service]
   internal_port = 3000
