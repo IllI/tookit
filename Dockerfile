@@ -37,17 +37,26 @@ FROM base
 
 # Install Chrome and its dependencies
 RUN apt-get update -qq && \
-    apt-get install -y wget gnupg2 && \
+    apt-get install -y wget gnupg2 dbus xvfb x11-xserver-utils && \
     wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add - && \
     sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list' && \
     apt-get update && \
     apt-get install -y google-chrome-stable fonts-ipafont-gothic fonts-wqy-zenhei fonts-thai-tlwg fonts-kacst fonts-freefont-ttf libxss1 && \
     rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 
+# Set up Xvfb and dbus
+RUN mkdir -p /var/run/dbus && \
+    dbus-uuidgen > /var/lib/dbus/machine-id
+
 # Copy built application
 COPY --from=build /app /app
 
 # Start the server by default, this can be overwritten at runtime
 EXPOSE 3000
+ENV DISPLAY=:99
 ENV PUPPETEER_EXECUTABLE_PATH="/usr/bin/google-chrome-stable"
-CMD [ "yarn", "start" ]
+
+# Start Xvfb, dbus and the application
+CMD /usr/bin/Xvfb :99 -screen 0 1024x768x24 > /dev/null 2>&1 & \
+    service dbus start & \
+    yarn start
