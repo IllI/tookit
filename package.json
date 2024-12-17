@@ -27,6 +27,7 @@
     "x-crawl": "7.1.2"
   },
   "devDependencies": {
+    "@flydotio/dockerfile": "0.5.9",
     "@tailwindcss/forms": "0.5.7",
     "@types/node": "20.8.9",
     "@types/react": "18.2.33",
