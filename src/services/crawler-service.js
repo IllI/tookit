@@ -1,10 +1,13 @@
 import { createClient } from '@supabase/supabase-js';
-import puppeteer from 'puppeteer-extra';
+import puppeteer from 'puppeteer';
+import { addExtra } from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import { getParser } from './llm-service';
 import { TicketParser } from './ticket-parser';
 
-puppeteer.use(StealthPlugin());
+// Create the browser with stealth
+const puppeteerExtra = addExtra(puppeteer);
+puppeteerExtra.use(StealthPlugin());
 
 class CrawlerService {
   constructor() {
@@ -36,8 +39,7 @@ class CrawlerService {
   async initialize() {
     if (!this.browser) {
       const launchOptions = {
-        //headless: 'new',
-        headless: false,
+        headless: true,
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',
@@ -45,15 +47,40 @@ class CrawlerService {
           '--disable-accelerated-2d-canvas',
           '--disable-gpu',
           '--window-size=1920,1080',
-          '--disable-blink-features=AutomationControlled'
+          '--disable-blink-features=AutomationControlled',
+          '--disable-features=IsolateOrigins,site-per-process',
+          '--disable-web-security',
+          '--no-first-run',
+          '--no-zygote',
+          '--disable-notifications',
+          '--disable-popup-blocking'
         ],
-        ignoreDefaultArgs: ['--enable-automation']
+        ignoreDefaultArgs: ['--enable-automation'],
+        ignoreHTTPSErrors: true
       };
 
-      this.browser = await puppeteer.launch(launchOptions);
-      console.log('Browser initialized');
+      try {
+        // Use puppeteerExtra instead of puppeteer
+        this.browser = await puppeteerExtra.launch(launchOptions);
+        
+        // Log user agent and other details for debugging
+        const page = await this.browser.newPage();
+        const userAgent = await page.evaluate(() => navigator.userAgent);
+        const webdriver = await page.evaluate(() => navigator.webdriver);
+        console.log('Browser details:', {
+          userAgent,
+          webdriver,
+          chrome: await page.evaluate(() => !!window.chrome)
+        });
+        await page.close();
+        
+        console.log('Browser initialized with stealth');
+      } catch (error) {
+        console.error('Browser initialization error:', error);
+        throw error;
+      }
     }
-    return { browser: this.browser };
+    return this.browser;
   }
 
   async crawlPage({ url, waitForSelector, eventId }) {
@@ -62,13 +89,11 @@ class CrawlerService {
       console.log('Cleared processed events for new search');
     }
 
-    let context = null;
     let page = null;
     
     try {
-      const { browser } = await this.initialize();
-      context = await browser.createIncognitoBrowserContext();
-      page = await context.newPage();
+      const browser = await this.initialize();
+      page = await browser.newPage();
       
       // Enhanced stealth setup
       await page.setViewport({ width: 1920, height: 1080 });
@@ -106,7 +131,7 @@ class CrawlerService {
 
           console.log(`Attempt ${attempt}/${this.maxAttempts} to load: ${pageUrl}`);
           
-          await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+          await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 5000 });
           
           // Wait for content to load based on page type
           if (url.includes('vividseats.com')) {
@@ -180,7 +205,6 @@ class CrawlerService {
       throw error;
     } finally {
       if (page) await page.close();
-      if (context) await context.close();
     }
   }
 
@@ -198,8 +222,18 @@ class CrawlerService {
       return;
     }
 
+    // Filter out parking entries
+    const parkingKeywords = ['parking', 'parking pass', 'parking only', 'official parking'];
+    const isParking = (name) => {
+      const lowerName = name.toLowerCase();
+      return parkingKeywords.some(keyword => lowerName.includes(keyword));
+    };
+
+    const filteredEvents = parsedEvents.events.filter(event => !isParking(event.name));
+    console.log(`Filtered out ${parsedEvents.events.length - filteredEvents.length} parking entries`);
+
     // Process each event one at a time
-    for (const event of parsedEvents.events) {
+    for (const event of filteredEvents) {
       try {
         // Track if we've seen this event before
         const eventKey = `${event.name}-${event.venue}-${event.date}`;
@@ -327,6 +361,18 @@ class CrawlerService {
 
   // Helper function to compare event names
   areNamesSimilar(name1, name2) {
+    // First check if either name is for parking
+    const parkingKeywords = ['parking', 'parking pass', 'parking only', 'official parking'];
+    const isParking = (name) => {
+      const lowerName = name.toLowerCase();
+      return parkingKeywords.some(keyword => lowerName.includes(keyword));
+    };
+
+    // If either is a parking entry, they're not similar
+    if (isParking(name1) || isParking(name2)) {
+      return false;
+    }
+
     const clean1 = name1.toLowerCase().replace(/[^a-z0-9]/g, '');
     const clean2 = name2.toLowerCase().replace(/[^a-z0-9]/g, '');
     
@@ -335,8 +381,6 @@ class CrawlerService {
     
     // Check if one name contains the other
     if (clean1.includes(clean2) || clean2.includes(clean1)) return true;
-    
-    // Could add more sophisticated comparison if needed
     
     return false;
   }
