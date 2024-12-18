@@ -1,6 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { searchService } from '@/src/services/search-service';
-import type { SearchParams } from '@/src/services/types';
+import { searchService } from '@/src/lib';
+import type { SearchParams } from '@/src/lib/types';
 
 export default async function handler(
   req: NextApiRequest,
