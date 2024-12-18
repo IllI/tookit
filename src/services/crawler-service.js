@@ -83,13 +83,12 @@ class CrawlerService {
       console.log('Cleared processed events for new search');
     }
 
-    let context = null;
     let page = null;
     
     try {
-      const { browser } = await this.initialize();
-      context = await browser.createIncognitoBrowserContext();
-      page = await context.newPage();
+      // Get browser instance directly, no destructuring needed
+      const browser = await this.initialize();
+      page = await browser.newPage(); // Create page directly from browser
       
       // Enhanced stealth setup
       await page.setViewport({ width: 1920, height: 1080 });
@@ -201,7 +200,6 @@ class CrawlerService {
       throw error;
     } finally {
       if (page) await page.close();
-      if (context) await context.close();
     }
   }
 
