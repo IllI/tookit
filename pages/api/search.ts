@@ -1,5 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { searchService } from '@/src/lib';
+import { searchService } from '@/src/services/search-service';
 import type { SearchParams } from '@/src/lib/types';
 
 export default async function handler(
@@ -10,7 +10,6 @@ export default async function handler(
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  // Set SSE headers
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
@@ -20,17 +19,14 @@ export default async function handler(
 
   const params = req.body as SearchParams;
 
-  // Helper function to send SSE messages
   const sendEvent = (data: any) => {
     res.write(`data: ${JSON.stringify(data)}\n\n`);
-    // Force flush if available
     if (typeof (res as any).flush === 'function') {
       (res as any).flush();
     }
   };
 
   try {
-    // Set up event listeners
     searchService.on('status', (message: string) => {
       console.log('Status update:', message);
       sendEvent({ type: 'status', message });
@@ -46,11 +42,9 @@ export default async function handler(
       sendEvent({ type: 'error', error });
     });
 
-    // Start the search
     console.log('Starting search with params:', params);
     const result = await searchService.searchAll(params);
 
-    // Send completion event
     sendEvent({
       type: 'complete',
       success: true,
