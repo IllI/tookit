@@ -35,6 +35,8 @@ class CrawlerService {
 
   async initialize() {
     if (!this.browser) {
+      const isProduction = process.env.NODE_ENV === 'production';
+      
       const launchOptions = {
         headless: true,
         args: [
@@ -56,15 +58,18 @@ class CrawlerService {
           '--hide-scrollbars',
           '--metrics-recording-only',
           '--mute-audio',
-          '--no-first-run',
           '--safebrowsing-disable-auto-update',
           '--headless=new',
           '--disable-software-rasterizer'
         ],
         ignoreDefaultArgs: ['--enable-automation'],
-        ignoreHTTPSErrors: true,
-        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome-stable'
+        ignoreHTTPSErrors: true
       };
+
+      // Only set executablePath in production
+      if (isProduction) {
+        launchOptions.executablePath = '/usr/bin/google-chrome-stable';
+      }
 
       try {
         this.browser = await puppeteer.launch(launchOptions);
