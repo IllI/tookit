@@ -41,7 +41,14 @@ RUN apt-get update && apt-get install -y \
     libxss1 \
     libxtst6 \
     lsb-release \
-    xdg-utils
+    xdg-utils \
+    xvfb \
+    dbus \
+    dbus-x11
+
+# Set up dbus
+RUN mkdir -p /var/run/dbus && \
+    dbus-uuidgen > /var/lib/dbus/machine-id
 
 # Install Chrome
 RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add - \
@@ -71,9 +78,9 @@ RUN npm run build
 ENV NODE_ENV=production
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome-stable
+ENV DISPLAY=:99
 
-# Expose port
-EXPOSE 3000
-
-# Start the application
-CMD ["npm", "start"] 
+# Start Xvfb, dbus and the application
+CMD Xvfb :99 -screen 0 1024x768x16 & \
+    service dbus start & \
+    npm start 

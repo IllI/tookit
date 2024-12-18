@@ -36,8 +36,7 @@ class CrawlerService {
   async initialize() {
     if (!this.browser) {
       const launchOptions = {
-        //headless: 'new',
-        headless: false,
+        headless: true,
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',
@@ -45,15 +44,37 @@ class CrawlerService {
           '--disable-accelerated-2d-canvas',
           '--disable-gpu',
           '--window-size=1920,1080',
-          '--disable-blink-features=AutomationControlled'
+          '--disable-blink-features=AutomationControlled',
+          '--no-first-run',
+          '--no-zygote',
+          '--single-process',
+          '--disable-extensions',
+          '--disable-background-networking',
+          '--disable-default-apps',
+          '--disable-sync',
+          '--disable-translate',
+          '--hide-scrollbars',
+          '--metrics-recording-only',
+          '--mute-audio',
+          '--no-first-run',
+          '--safebrowsing-disable-auto-update',
+          '--headless=new',
+          '--disable-software-rasterizer'
         ],
-        ignoreDefaultArgs: ['--enable-automation']
+        ignoreDefaultArgs: ['--enable-automation'],
+        ignoreHTTPSErrors: true,
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome-stable'
       };
 
-      this.browser = await puppeteer.launch(launchOptions);
-      console.log('Browser initialized');
+      try {
+        this.browser = await puppeteer.launch(launchOptions);
+        console.log('Browser initialized with headless mode');
+      } catch (error) {
+        console.error('Browser initialization error:', error);
+        throw error;
+      }
     }
-    return { browser: this.browser };
+    return this.browser;
   }
 
   async crawlPage({ url, waitForSelector, eventId }) {
