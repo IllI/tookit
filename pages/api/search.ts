@@ -1,5 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { SearchService } from '@/lib/services/search-service';
+import { searchService } from '@/src/services/search-service';
 import type { SearchParams } from '@/lib/types/api';
 
 export default async function handler(
@@ -18,7 +18,6 @@ export default async function handler(
     'X-Accel-Buffering': 'no'
   });
 
-  const searchService = new SearchService();
   const params = req.body as SearchParams;
 
   // Helper function to send SSE messages
