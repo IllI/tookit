@@ -1,513 +1,220 @@
-import { time } from 'console';
-import { JSDOM } from 'jsdom';
-
-interface EventData {
-  name: string;
-  date: string;
-  venue: string;
-  city: string;
-  state: string;
-  country: string;
-  location: string;
-  source: string;
-  source_url: string;
-  eventUrl: string;
-}
-
-interface TicketData {
-  section: string;
-  row?: string;
-  price: number;
-  quantity: number;
-  listing_id: string;
-  source: 'stubhub' | 'vividseats';
-  date_posted: string;
-  sold: boolean;
-}
-
-interface ParsedResponse {
-  events?: EventData[];
-  tickets?: TicketData[];
-}
+import { load } from 'cheerio';
+import { parseLocation } from './utils';
 
 export class TicketParser {
-  private dom: JSDOM;
-  private source: 'stubhub' | 'vividseats';
+  private $: cheerio.Root;
+  private source: string;
+  private url: string;
 
-  constructor(htmlContent: string, source: 'stubhub' | 'vividseats') {
-    this.dom = new JSDOM(htmlContent, {
-      runScripts: 'outside-only',
-      resources: 'usable',
-      features: {
-        FetchExternalResources: false,
-        ProcessExternalResources: false,
-        SkipExternalResources: true
-      }
-    });
+  constructor(html: string, source: string) {
+    this.$ = load(html);
     this.source = source;
+    this.url = this.$('link[rel="canonical"]').attr('href') || '';
   }
 
-  private getQuantityFromText(text: string): number {
-    const match = text.match(/(\d+)(?:\s*-\s*(\d+))?\s*tickets?/i);
-    if (match) {
-      return parseInt(match[2] || match[1]);
+  parseSearchResults() {
+    if (this.source === 'stubhub') {
+      return this.parseStubHubSearch();
+    } else if (this.source === 'vividseats') {
+      return this.parseVividSeatsSearch();
     }
-    return 1;
+    return { events: [] };
   }
 
-  private standardizeDate(dateStr: string, source: 'stubhub' | 'vividseats'): string {
-    if (!dateStr) return '';
-    
-    console.log(`Standardizing ${source} date:`, dateStr);
+  parseVividSeatsSearch() {
+    const events: any[] = [];
+    const listings = this.$('[data-testid^="production-listing-"]');
+    console.log(`Found ${listings.length} VividSeats event items`);
 
-    // If already ISO format, return as is
-    if (dateStr.match(/^\d{4}-\d{2}-\d{2}T/)) {
-      return dateStr;
-    }
+    listings.each((i, elem) => {
+      const cardContent = this.$(elem);
+      const url = cardContent.find('a').first().attr('href') || '';
+      const name = cardContent.find('[class*="ProductName"]').text().trim();
+      const dateText = cardContent
+        .find('[class*="DateAndTime"]')
+        .text()
+        .replace(/\s+/g, '');
+      const date = this.standardizeDate(dateText, 'vividseats');
+      const venue = cardContent.find('[class*="VenueName"]').text().trim();
+      const { city, state } = parseLocation(
+        cardContent.find('[class*="Location"]').text().trim()
+      );
+      const location = `${city}, ${state}`;
 
-    // Clean up the input string
-    let cleaned = dateStr
-      .replace(/🔥.*?left/g, '')     // Remove emoji and "tickets left" text
-      .replace(/\s+/g, ' ')          // Normalize spaces
-      .replace(/(\d)(am|pm)/i, '$1 $2') // Add space before am/pm
-      .trim();
+      const eventData = {
+        url,
+        name,
+        date,
+        venue,
+        city,
+        state,
+        location,
+      };
+      console.log('VividSeats extracted data:', eventData);
+      events.push(eventData);
+    });
 
-    // For VividSeats, handle concatenated weekday and month
-    if (source === 'vividseats') {
-      const weekdays = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
-      const months = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
-      
-      // Find and separate weekday from month if they're stuck together
-      for (const weekday of weekdays) {
-        for (const month of months) {
-          const pattern = new RegExp(`${weekday}${month}`, 'i');
-          if (pattern.test(cleaned)) {
-            cleaned = cleaned.replace(pattern, `${month}`);
-            break;
-          }
-        }
-      }
-    }
-
-    console.log('Cleaned date string:', cleaned);
-
-    try {
-      let match;
-      
-      if (source === 'vividseats') {
-        // Handle VividSeats format: "Aug 292025 6:01 pm"
-        match = cleaned.match(/([A-Za-z]{3})\s*(\d{1,2})(?:\s*(\d{4}))?\s*(\d{1,2}):(\d{2})\s*(am|pm)/i);
-        
-        if (match) {
-          const [, month, day, yearStr, hours, minutes, ampm] = match;
-          let year = yearStr ? parseInt(yearStr) : new Date().getFullYear();
-          
-          // Handle cases where year might be concatenated with day
-          if (!yearStr && day.length > 2) {
-            const dayAndYear = day.match(/(\d{1,2})(\d{4})/);
-            if (dayAndYear) {
-              year = parseInt(dayAndYear[2]);
-              return this.createDateFromParts(month, dayAndYear[1], year, hours, minutes, ampm);
-            }
-          }
-          
-          // If date is in past, assume next year
-          const date = this.createDateFromParts(month, day, year, hours, minutes, ampm);
-          if (new Date(date) < new Date()) {
-            return this.createDateFromParts(month, day, year + 1, hours, minutes, ampm);
-          }
-          return date;
-        }
-      } else {
-        // StubHub format handling
-        match = cleaned.match(/([A-Za-z]{3})\s+(\d{1,2})\s+(\d{4})\s*(\d{1,2}):(\d{2})\s*(AM|PM)/i);
-        
-        if (match) {
-          const [, month, day, year, hours, minutes, ampm] = match;
-          return this.createDateFromParts(month, day, parseInt(year), hours, minutes, ampm);
-        }
-      }
-
-      console.error(`Failed to parse ${source} date:`, cleaned);
-      throw new Error(`Invalid date format: ${dateStr}`);
-
-    } catch (error) {
-      console.error('Error standardizing date:', error);
-      throw error;
-    }
+    return { events };
   }
 
-  parseSearchResults(): ParsedResponse {
-    // Use source-specific parser
-    return this.source === 'stubhub' 
-      ? this.parseStubHubSearch()
-      : this.parseVividSeatsSearch();
+  parseStubHubSearch() {
+    const events: any[] = [];
+    const listings = this.$('a[href*="/event/"]');
+    console.log(`Found ${listings.length} StubHub event items`);
+
+    listings.each((i, elem) => {
+      const cardContent = this.$(elem);
+      const url = cardContent.attr('href') || '';
+      const name = cardContent.find('h3').text().trim();
+      const dateText = cardContent
+        .find('time')
+        .text()
+        .replace(/\s+/g, ' ')
+        .trim();
+      const date = this.standardizeDate(dateText, 'stubhub');
+      const venueInfo = cardContent.find('span').eq(1).text().split('•');
+      const venue = venueInfo[0].trim();
+      const { city, state } = parseLocation(venueInfo[1]?.trim() || '');
+      const location = `${city}, ${state}`;
+
+      const eventData = {
+        url,
+        name,
+        date,
+        venue,
+        city,
+        state,
+        location,
+      };
+      console.log('StubHub extracted data:', eventData);
+      events.push(eventData);
+    });
+
+    return { events };
   }
 
-  private parseStubHubSearch(): ParsedResponse {
-    const document = this.dom.window.document;
-    const events: EventData[] = [];
+  parseEventTickets() {
+    if (this.source === 'stubhub') {
+      return this.parseStubHubTickets();
+    } else if (this.source === 'vividseats') {
+      return this.parseVividSeatsTickets();
+    }
+    return { tickets: [] };
+  }
 
-    // Find event containers - look for li elements that have both time and event link
-    const eventContainers = Array.from(document.querySelectorAll('li'))
-      .filter(li => {
-        const hasTime = !!li.querySelector('time');
-        const hasEventLink = !!li.querySelector('a[href*="/event/"]');
-        return hasTime && hasEventLink;
+  parseStubHubTickets() {
+    const tickets: any[] = [];
+    const listings = this.$('.TicketList-row');
+
+    listings.each((i, elem) => {
+      const listing = this.$(elem);
+      tickets.push({
+        section: listing.find('.section').text().trim(),
+        row: listing.find('.row').text().trim(),
+        price: parseFloat(
+          listing.find('.price').text().replace(/[^0-9.]/g, '')
+        ),
+        quantity: parseInt(listing.find('.quantity').text().trim() || '1'),
+        listing_id: `stubhub-${Date.now()}-${Math.random()}`
       });
-
-    eventContainers.forEach((container) => {
-      try {
-        // Get time element
-        const timeEl = container.querySelector('time');
-        const dateText = timeEl?.textContent?.trim() || '';
-        
-        // Get event link and URL
-        const link = container.querySelector('a[href*="/event/"]');
-        const href = link?.getAttribute('href')?.split('?')[0];
-
-        // Get all spans in the container and filter for content
-        const allSpans = Array.from(container.querySelectorAll('span'));
-        
-        // Name is in the span that's a direct child of the link
-        const nameSpan = link?.querySelector('span');
-        const name = nameSpan?.textContent?.trim();
-
-        // Get venue and location from spans that follow a specific pattern
-        const infoSpans = allSpans.filter(span => {
-          const text = span.textContent?.trim() || '';
-          // Exclude spans with generic text
-          return text && 
-                 !text.includes('See tickets') &&
-                 !text.includes('Favorite') &&
-                 !text.includes('Sort by') &&
-                 !text.includes('selling fast') &&
-                 !text.includes('This week') &&
-                 !text.includes('Today') &&
-                 !text.includes('Tomorrow');
-        });
-
-        // Venue is typically the second meaningful span
-        const venue = infoSpans[1]?.textContent?.trim();
-
-        // Location is the span containing "City, ST" format
-        const locationSpan = infoSpans.find(span => 
-          span.textContent?.match(/[A-Za-z\s]+,\s*[A-Z]{2}(?:,\s*USA)?$/)
-        );
-        const locationText = locationSpan?.textContent?.trim() || '';
-        
-        // Parse city and state from location
-        const [city, state] = locationText.split(',').map(s => s.trim());
-        const stateCode = state?.replace(/, USA$/, '');
-
-        // Parse date components with improved regex to capture each part
-        const dateMatch = dateText.match(/(\w{3})\s+(\d{1,2})\s+(\d{4})\s*(\w{3})\s*(\d{1,2}):(\d{2})\s*(AM|PM)/i);
-        if (dateMatch) {
-          const [, month, day, year, , hours, minutes, ampm] = dateMatch;
-          
-          // Convert month abbreviation to number
-          const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-          const monthNum = monthNames.findIndex(m => m.toLowerCase() === month.toLowerCase()) + 1;
-          
-          // Convert to 24-hour format
-          let hour = parseInt(hours);
-          if (ampm.toLowerCase() === 'pm' && hour < 12) hour += 12;
-          if (ampm.toLowerCase() === 'am' && hour === 12) hour = 0;
-
-          // Create ISO timestamp
-          const date = new Date(
-            parseInt(year),
-            monthNum - 1, // JS months are 0-based
-            parseInt(day),
-            hour,
-            parseInt(minutes)
-          );
-
-          if (name && venue && city && stateCode && href) {
-            events.push({
-              name,
-              date: date.toISOString(),
-              venue,
-              city,
-              state: stateCode,
-              country: 'USA',
-              location: `${city}, ${stateCode}`,
-              source: 'stubhub',
-              source_url: href.startsWith('http') ? href : `https://www.stubhub.com${href}`,
-              eventUrl: href.startsWith('http') ? href : `https://www.stubhub.com${href}`
-            });
-          }
-        }
-
-      } catch (error) {
-        console.error('Error parsing event:', error);
-      }
     });
 
-    return { events };
-  }
-
-  private parseVividSeatsSearch(): ParsedResponse {
-    const document = this.dom.window.document;
-    const events: EventData[] = [];
-
-    // Find event listings using data-testid attribute
-    const eventListings = document.querySelectorAll('div[data-testid^="production-listing-"]');
-    console.log(`Found ${eventListings.length} VividSeats event items`);
-
-    eventListings.forEach(listing => {
-      try {
-        // Get link from the direct child <a> element
-        const link = listing.querySelector('a');
-        const href = link?.getAttribute('href') || '';
-        const fullUrl = href.startsWith('http') ? href : `https://www.vividseats.com${href}`;
-        
-        // Get date from date-time element
-        const dateElement = listing.querySelector('[data-testid="date-time-left-element"]');
-        const dateText = dateElement?.textContent?.replace(/🔥.*?left/g, '').trim() || '';
-
-        // Get subtitle section that contains venue and location
-        const subtitleDiv = listing.querySelector('[data-testid="subtitle"]');
-        const spans = Array.from(subtitleDiv?.querySelectorAll('span') || []);
-        
-        // First span in subtitle is venue
-        const venue = spans[0]?.textContent?.replace(/•/g, '').trim() || '';
-        
-        // Last span in subtitle is location
-        const locationText = spans[spans.length - 1]?.textContent?.replace(/•/g, '').trim() || '';
-        
-        // Parse city and state from location
-        const [city, state] = locationText.split(',').map(s => s.trim());
-        const stateCode = state?.replace(/, USA$/, '');
-
-        // Get name from URL pattern
-        const urlMatch = href.match(/\/([^/]+)-tickets/);
-        const name = urlMatch ? 
-          urlMatch[1].replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase()) : '';
-
-        console.log('VividSeats extracted data:', {
-          url: href,
-          name,
-          date: dateText,
-          venue,
-          city,
-          state: stateCode,
-          location: locationText
-        });
-
-        if (name && dateText && venue && city && stateCode && href) {
-          events.push({
-            name,
-            date: this.standardizeDate(dateText, 'vividseats'),
-            venue,
-            city,
-            state: stateCode,
-            country: 'USA',
-            location: `${city}, ${stateCode}`,
-            source: 'vividseats',
-            source_url: fullUrl,
-            eventUrl: fullUrl
-          });
-        }
-      } catch (error) {
-        console.error('Error parsing VividSeats event:', error);
-      }
-    });
-
-    return { events };
-  }
-
-  parseEventTickets(): ParsedResponse {
-    const tickets = this.parseTickets();
     return { tickets };
   }
 
-  private parseTickets(): TicketData[] {
-    return this.source === 'stubhub' 
-      ? this.parseStubHubTickets()
-      : this.parseVividSeatsTickets();
-  }
+  parseVividSeatsTickets() {
+    const tickets: any[] = [];
+    const listings = this.$('.ticket-list-item');
 
-  private parseStubHubTickets(): TicketData[] {
-    const document = this.dom.window.document;
-    const tickets: TicketData[] = [];
-  
-    const listingsContainer = document.querySelector('#listings-container');
-    if (!listingsContainer) {
-      console.log('No ticket listings container found');
-      return tickets;
-    }
-  
-    const listings = listingsContainer.querySelectorAll('[role="button"][data-listing-id]');
-    console.log(`Found ${listings.length} StubHub listings`);
-  
-    listings.forEach((listing) => {
-      try {
-        // Skip if ticket is sold
-        const soldText = listing.textContent?.toLowerCase() || '';
-        if (soldText.includes('sold')) {
-          return;
-        }
-
-        const listingId = listing.getAttribute('data-listing-id') || 
-                         `stubhub-${Date.now()}-${Math.random()}`;
-  
-        const priceStr = listing.getAttribute('data-price') || '0';
-        const price = parseFloat(priceStr.replace(/[^0-9.]/g, ''));
-  
-        // Parse section and row more carefully
-        const sectionText = listing.textContent || '';
-        
-        let section = 'GA';  // Default to GA
-        let row: string | undefined;
-
-        // Check for VIP tickets first
-        if (sectionText.toLowerCase().includes('vip')) {
-          section = 'VIP';
-        } else {
-          // Try to find specific section numbers/names
-          const sectionMatch = sectionText.match(/Section\s+([A-Z0-9]+)/i);
-          if (sectionMatch) {
-            section = sectionMatch[1].trim();
-          }
-        }
-
-        // Look for row information
-        const rowMatch = sectionText.match(/Row\s+([A-Z0-9]+)/i);
-        if (rowMatch) {
-          row = rowMatch[1].trim();
-        }
-
-        // Get quantity
-        const quantityText = listing.textContent?.match(/(\d+)(?:\s*-\s*(\d+))?\s*tickets?/i) || [];
-        const quantity = parseInt(quantityText[2] || quantityText[1] || '1');
-
-        console.log('Parsed StubHub ticket:', {
-          section,
-          row,
-          price,
-          quantity,
-          listingId,
-          fullText: sectionText.slice(0, 100)
-        });
-  
-        if (price > 0) {
-          tickets.push({
-            section,
-            row,
-            price,
-            quantity,
-            listing_id: listingId,
-            source: 'stubhub',
-            date_posted: new Date().toISOString(),
-            sold: false
-          });
-        }
-      } catch (error) {
-        console.error('Error parsing StubHub ticket:', error);
-      }
-    });
-  
-    return tickets;
-  }
-  
-  private parseVividSeatsTickets(): TicketData[] {
-    const document = this.dom.window.document;
-    const tickets: TicketData[] = [];
-
-    const ticketRows = document.querySelectorAll('[data-testid^="VB"]');
-    console.log(`Found ${ticketRows.length} VividSeats ticket rows`);
-
-    ticketRows.forEach(row => {
-      try {
-        const listing_id = row.getAttribute('data-testid') || '';
-        const ticketText = row.textContent || '';
-
-        // Default to GA unless we find specific section info
-        let section = 'GA';
-        let row_number: string | undefined;
-
-        // Check for VIP first
-        if (ticketText.toLowerCase().includes('vip')) {
-          section = 'VIP';
-        } else {
-          // Look for specific section numbers/names
-          const sectionMatch = ticketText.match(/Section\s+([A-Z0-9]+)/i);
-          if (sectionMatch) {
-            section = sectionMatch[1].trim();
-          }
-        }
-
-        // Look for row information
-        const rowMatch = ticketText.match(/Row\s+([A-Z0-9]+)/i);
-        if (rowMatch) {
-          row_number = rowMatch[1].trim();
-        }
-
-        // Get price
-        const priceEl = row.querySelector('[data-testid="listing-price"]');
-        const priceText = priceEl?.textContent?.trim() || '0';
-        const price = parseFloat(priceText.replace(/[^0-9.]/g, ''));
-
-        // Get quantity
-        const quantityEl = row.querySelector('[data-testid="ticket-quantity"]');
-        const quantityText = quantityEl?.textContent || '1';
-        const quantity = this.getQuantityFromText(quantityText);
-
-        console.log('Parsed VividSeats ticket:', {
-          section,
-          row: row_number,
-          price,
-          quantity,
-          listing_id,
-          fullText: ticketText.slice(0, 100)
-        });
-
-        if (price > 0) {
-          tickets.push({
-            section,
-            row: row_number,
-            price,
-            quantity,
-            listing_id,
-            source: 'vividseats',
-            date_posted: new Date().toISOString(),
-            sold: false
-          });
-        }
-      } catch (error) {
-        console.error('Error parsing VividSeats ticket:', error);
-      }
+    listings.each((i, elem) => {
+      const listing = this.$(elem);
+      tickets.push({
+        section: listing.find('.section').text().trim() || 'General',
+        row: listing.find('.row').text().trim(),
+        price: parseFloat(
+          listing.find('.price').text().replace(/[^0-9.]/g, '')
+        ),
+        quantity: parseInt(listing.find('.quantity').text().trim() || '1'),
+        listing_id: `vividseats-${Date.now()}-${Math.random()}`
+      });
     });
 
-    return tickets;
+    return { tickets };
   }
 
-  private createDateFromParts(month: string, day: string | number, year: number, hours: string | number, minutes: string | number, ampm: string): string {
-    // Convert month name to number
-    const monthNames = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
-    const monthIndex = monthNames.indexOf(month.toLowerCase());
-    if (monthIndex === -1) {
-      throw new Error(`Invalid month: ${month}`);
+  private standardizeDate(dateStr: string, source: string): string {
+    console.log(`Standardizing ${source} date: ${dateStr}`);
+    try {
+      if (source === 'vividseats') {
+        // Example: "FriJun620257:30pm"
+        const match = dateStr.match(
+          /(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)?([A-Za-z]{3})(\d{1,2})(\d{4})(\d{1,2}):(\d{2})(am|pm)/i
+        );
+        if (!match) return '';
+
+        const [, month, day, year, hours, minutes, ampm] = match;
+        const cleanedDate = `${month} ${day}${year}${hours}:${minutes} ${ampm}`;
+        const standardDate = this.createDate({
+          month: month.toLowerCase(),
+          day,
+          year: parseInt(year),
+          hours,
+          minutes,
+          ampm: ampm.toLowerCase()
+        });
+
+        return standardDate;
+      } else if (source === 'stubhub') {
+        // Example: "Fri Jun 6 2025 7:30PM"
+        const match = dateStr.match(
+          /(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)?\s*([A-Za-z]{3})\s*(\d{1,2})\s*(\d{4})\s*(\d{1,2}):(\d{2})(AM|PM)/i
+        );
+        if (!match) return '';
+
+        const [, month, day, year, hours, minutes, ampm] = match;
+        const standardDate = this.createDate({
+          month: month.toLowerCase(),
+          day,
+          year: parseInt(year),
+          hours,
+          minutes,
+          ampm: ampm.toLowerCase()
+        });
+
+        return standardDate;
+      }
+    } catch (error) {
+      console.error(`Error standardizing date ${dateStr}:`, error);
     }
+    return '';
+  }
 
-    // Convert to 24-hour time
-    let hour = parseInt(hours.toString());
-    if (ampm.toLowerCase() === 'pm' && hour < 12) hour += 12;
-    if (ampm.toLowerCase() === 'am' && hour === 12) hour = 0;
+  private createDate({
+    month,
+    day,
+    year,
+    hours,
+    minutes,
+    ampm
+  }: {
+    month: string;
+    day: string;
+    year: number;
+    hours: string;
+    minutes: string;
+    ampm: string;
+  }) {
+    console.log('Cleaned date string:', `${month} ${day}${year}${hours}:${minutes} ${ampm}`);
+    const monthMap: { [key: string]: number } = {
+      jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
+      jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11
+    };
 
-    // Create date object
-    const date = new Date(
-      year,
-      monthIndex,
-      parseInt(day.toString()),
-      hour,
-      parseInt(minutes.toString())
-    );
+    let hr = parseInt(hours);
+    if (ampm === 'pm' && hr < 12) hr += 12;
+    if (ampm === 'am' && hr === 12) hr = 0;
 
-    if (isNaN(date.getTime())) {
-      throw new Error('Invalid date components');
-    }
+    const date = new Date(year, monthMap[month], parseInt(day), hr, parseInt(minutes));
 
     console.log('Created date:', {
       input: { month, day, year, hours, minutes, ampm },
@@ -516,5 +223,4 @@ export class TicketParser {
 
     return date.toISOString();
   }
-
-} 
+}
