@@ -1,12 +1,14 @@
 import { EventEmitter } from 'events';
-import { crawlerService } from './crawler-service';
+import { crawlerService, CrawlerService } from './crawler-service';
 import type { SearchParams, SearchResult } from '../types/api';
 
 export class SearchService extends EventEmitter {
+  private crawler: CrawlerService;
+
   constructor() {
     super();
-    // Link the crawler service with this search service
-    crawlerService.searchService = this;
+    this.crawler = crawlerService;
+    this.crawler.searchService = this;
   }
 
   async searchAll(params: SearchParams): Promise<SearchResult> {
@@ -52,7 +54,7 @@ export class SearchService extends EventEmitter {
         [params.keyword, params.location].filter(Boolean).join(' ')
       )}`;
 
-      const result = await crawlerService.crawlPage({
+      const result = await this.crawler.crawlPage({
         url: searchUrl,
         waitForSelector: '#app'
       });
@@ -80,7 +82,7 @@ export class SearchService extends EventEmitter {
         [params.keyword, params.location].filter(Boolean).join(' ')
       )}`;
 
-      const result = await crawlerService.crawlPage({
+      const result = await this.crawler.crawlPage({
         url: searchUrl,
         waitForSelector: '[data-testid^="production-listing-"]'
       });
