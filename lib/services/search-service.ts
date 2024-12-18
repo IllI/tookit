@@ -140,6 +140,17 @@ export class SearchService extends EventEmitter {
 
       // After all searches complete, fetch all tickets from database
       this.emit('status', 'Fetching final ticket list...');
+
+      // First get matching event IDs
+      const { data: matchingEvents } = await this.supabase
+        .from('events')
+        .select('id')
+        .ilike('name', `%${params.keyword}%`)  // Filter by search keyword
+        .gte('date', new Date().toISOString());
+
+      const eventIds = matchingEvents?.map(e => e.id) || [];
+
+      // Then get tickets for those events
       const { data: tickets, error } = await this.supabase
         .from('tickets')
         .select(`
@@ -162,6 +173,7 @@ export class SearchService extends EventEmitter {
             )
           )
         `)
+        .in('event_id', eventIds)  // Only get tickets for matching events
         .order('price');
 
       if (error) {

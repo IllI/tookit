@@ -72,71 +72,68 @@ export class TicketParser {
       .replace(/(\d)(am|pm)/i, '$1 $2') // Add space before am/pm
       .trim();
 
+    // For VividSeats, handle concatenated weekday and month
+    if (source === 'vividseats') {
+      const weekdays = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
+      const months = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+      
+      // Find and separate weekday from month if they're stuck together
+      for (const weekday of weekdays) {
+        for (const month of months) {
+          const pattern = new RegExp(`${weekday}${month}`, 'i');
+          if (pattern.test(cleaned)) {
+            cleaned = cleaned.replace(pattern, `${month}`);
+            break;
+          }
+        }
+      }
+    }
+
     console.log('Cleaned date string:', cleaned);
 
-    // Extract components based on source-specific patterns
-    let match;
-    if (source === 'stubhub') {
-      // StubHub format: "Mar 21 2025 Fri 8:00 PM"
-      match = cleaned.match(/(\w{3})\s+(\d{1,2})\s+(\d{4})\s*(?:\w{3})?\s*(\d{1,2}):(\d{2})\s*(AM|PM)/i);
-    } else {
-      // VividSeats format: "FriMar 2120257:00pm"
-      match = cleaned.match(/(?:(\w{3}))?\s*(\w{3})\s*(\d{1,2})\s*(\d{4})\s*(\d{1,2}):(\d{2})\s*(AM|PM)/i);
-    }
-
-    if (!match) {
-      console.error(`Failed to parse ${source} date:`, cleaned);
-      return dateStr;
-    }
-
     try {
-      let month, day, year, hours, minutes, ampm;
+      let match;
       
-      if (source === 'stubhub') {
-        [, month, day, year, hours, minutes, ampm] = match;
+      if (source === 'vividseats') {
+        // Handle VividSeats format: "Aug 292025 6:01 pm"
+        match = cleaned.match(/([A-Za-z]{3})\s*(\d{1,2})(?:\s*(\d{4}))?\s*(\d{1,2}):(\d{2})\s*(am|pm)/i);
+        
+        if (match) {
+          const [, month, day, yearStr, hours, minutes, ampm] = match;
+          let year = yearStr ? parseInt(yearStr) : new Date().getFullYear();
+          
+          // Handle cases where year might be concatenated with day
+          if (!yearStr && day.length > 2) {
+            const dayAndYear = day.match(/(\d{1,2})(\d{4})/);
+            if (dayAndYear) {
+              year = parseInt(dayAndYear[2]);
+              return this.createDateFromParts(month, dayAndYear[1], year, hours, minutes, ampm);
+            }
+          }
+          
+          // If date is in past, assume next year
+          const date = this.createDateFromParts(month, day, year, hours, minutes, ampm);
+          if (new Date(date) < new Date()) {
+            return this.createDateFromParts(month, day, year + 1, hours, minutes, ampm);
+          }
+          return date;
+        }
       } else {
-        // VividSeats - ignore weekday if present
-        const startIdx = match[1] ? 2 : 1; // Skip weekday if present
-        [, , month, day, year, hours, minutes, ampm] = match;
+        // StubHub format handling
+        match = cleaned.match(/([A-Za-z]{3})\s+(\d{1,2})\s+(\d{4})\s*(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+        
+        if (match) {
+          const [, month, day, year, hours, minutes, ampm] = match;
+          return this.createDateFromParts(month, day, parseInt(year), hours, minutes, ampm);
+        }
       }
 
-      // Convert month name to number
-      const monthNames = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
-      const monthIndex = monthNames.indexOf(month.toLowerCase());
-      if (monthIndex === -1) {
-        throw new Error(`Invalid month: ${month}`);
-      }
-
-      // Convert to 24-hour time
-      let hour = parseInt(hours);
-      if (ampm.toLowerCase() === 'pm' && hour < 12) hour += 12;
-      if (ampm.toLowerCase() === 'am' && hour === 12) hour = 0;
-
-      // Create date object
-      const date = new Date(
-        parseInt(year),
-        monthIndex,
-        parseInt(day),
-        hour,
-        parseInt(minutes)
-      );
-
-      if (isNaN(date.getTime())) {
-        throw new Error('Invalid date components');
-      }
-
-      console.log('Standardized date:', {
-        input: dateStr,
-        cleaned,
-        components: { month, day, year, hours, minutes, ampm },
-        output: date.toISOString()
-      });
-
-      return date.toISOString();
+      console.error(`Failed to parse ${source} date:`, cleaned);
+      throw new Error(`Invalid date format: ${dateStr}`);
 
     } catch (error) {
       console.error('Error standardizing date:', error);
-      return dateStr;
+      throw error;
     }
   }
 
@@ -486,5 +483,38 @@ export class TicketParser {
     return tickets;
   }
 
+  private createDateFromParts(month: string, day: string | number, year: number, hours: string | number, minutes: string | number, ampm: string): string {
+    // Convert month name to number
+    const monthNames = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
+    const monthIndex = monthNames.indexOf(month.toLowerCase());
+    if (monthIndex === -1) {
+      throw new Error(`Invalid month: ${month}`);
+    }
+
+    // Convert to 24-hour time
+    let hour = parseInt(hours.toString());
+    if (ampm.toLowerCase() === 'pm' && hour < 12) hour += 12;
+    if (ampm.toLowerCase() === 'am' && hour === 12) hour = 0;
+
+    // Create date object
+    const date = new Date(
+      year,
+      monthIndex,
+      parseInt(day.toString()),
+      hour,
+      parseInt(minutes.toString())
+    );
+
+    if (isNaN(date.getTime())) {
+      throw new Error('Invalid date components');
+    }
+
+    console.log('Created date:', {
+      input: { month, day, year, hours, minutes, ampm },
+      output: date.toISOString()
+    });
+
+    return date.toISOString();
+  }
 
 } 

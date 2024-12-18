@@ -53,7 +53,12 @@ class CrawlerService {
           '--no-first-run',
           '--no-zygote',
           '--disable-notifications',
-          '--disable-popup-blocking'
+          '--disable-popup-blocking',
+          '--disable-blink-features=AutomationControlled',
+          '--disable-infobars',
+          '--window-position=0,0',
+          '--ignore-certifcate-errors',
+          '--ignore-certifcate-errors-spki-list'
         ],
         ignoreDefaultArgs: ['--enable-automation'],
         ignoreHTTPSErrors: true
@@ -129,29 +134,46 @@ class CrawlerService {
             ? `${url}${url.includes('?') ? '&' : '?'}quantity=0` 
             : url;
 
-          console.log(`Attempt ${attempt}/${this.maxAttempts} to load: ${pageUrl}`);
+          console.log('Starting page crawl:', {
+            url,
+            hasEventId: !!eventId,
+            attempt: attempt
+          });
           
-          await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 5000 });
+          await page.goto(pageUrl, { 
+            waitUntil: ['domcontentloaded', 'networkidle0'],
+            timeout: 30000  // Increase to 30 seconds
+          });
           
           // Wait for content to load based on page type
           if (url.includes('vividseats.com')) {
             console.log('Waiting for VividSeats content...');
             if (url.includes('search') || url.includes('/search/')) {
-              await page.waitForSelector('[data-testid^="production-listing-"]', { timeout: 5000 });
+              await page.waitForSelector('[data-testid^="production-listing-"]', { 
+                timeout: 30000  // Increase to 30 seconds
+              });
             } else {
-              await page.waitForSelector('[data-testid="listings-container"]', { timeout: 5000 });
+              await page.waitForSelector('[data-testid="listings-container"]', { 
+                timeout: 30000 
+              });
             }
           } else if (url.includes('stubhub.com')) {
             console.log('Waiting for StubHub content...');
             if (url.includes('search') || url.includes('/secure/search')) {
-              await page.waitForSelector('#app', { timeout: 5000 });
-              await page.waitForSelector('a[href*="/event/"]', { timeout: 5000 });
+              await page.waitForSelector('#app', { 
+                timeout: 30000 
+              });
+              await page.waitForSelector('a[href*="/event/"]', { 
+                timeout: 30000 
+              });
             } else {
-              await page.waitForSelector('#listings-container', { timeout: 5000 });
+              await page.waitForSelector('#listings-container', { 
+                timeout: 30000 
+              });
             }
           }
 
-          await page.waitForTimeout(1000);
+          await page.waitForTimeout(2000);
 
           const content = await page.evaluate(() => ({
             text: document.body.innerText,
@@ -194,8 +216,18 @@ class CrawlerService {
           };
 
         } catch (error) {
-          console.error(`Attempt ${attempt} failed:`, error.message);
-          if (attempt === this.maxAttempts) throw error;
+          console.error(`Attempt ${attempt} failed:`, {
+            url,
+            error: error.message,
+            stack: error.stack,
+            pageUrl: page?.url()
+          });
+          
+          if (attempt === this.maxAttempts) {
+            console.error('All attempts failed for URL:', url);
+            throw error;
+          }
+          
           attempt++;
           await new Promise(resolve => setTimeout(resolve, this.retryDelays[attempt - 1]));
         }
