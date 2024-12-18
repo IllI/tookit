@@ -36,6 +36,7 @@ class CrawlerService {
   async initialize() {
     if (!this.browser) {
       const isProduction = process.env.NODE_ENV === 'production';
+      console.log('Initializing browser in', isProduction ? 'production' : 'development');
       
       const launchOptions = {
         headless: true,
@@ -66,14 +67,21 @@ class CrawlerService {
         ignoreHTTPSErrors: true
       };
 
-      // Only set executablePath in production
       if (isProduction) {
+        console.log('Using Chrome at /usr/bin/google-chrome-stable');
         launchOptions.executablePath = '/usr/bin/google-chrome-stable';
       }
 
       try {
         this.browser = await puppeteer.launch(launchOptions);
-        console.log('Browser initialized with headless mode');
+        console.log('Browser launched successfully');
+
+        // Add disconnect handler
+        this.browser.on('disconnected', () => {
+          console.log('Browser disconnected');
+          this.browser = null;
+        });
+
       } catch (error) {
         console.error('Browser initialization error:', error);
         throw error;
@@ -83,6 +91,11 @@ class CrawlerService {
   }
 
   async crawlPage({ url, waitForSelector, eventId }) {
+    if (!this.browser) {
+      console.log('Browser not initialized, initializing now...');
+      await this.initialize();
+    }
+
     if (url.includes('search')) {
       this.processedEvents.clear();
       console.log('Cleared processed events for new search');
@@ -91,10 +104,10 @@ class CrawlerService {
     let page = null;
     
     try {
-      // Get browser instance directly, no destructuring needed
-      const browser = await this.initialize();
-      page = await browser.newPage(); // Create page directly from browser
-      
+      console.log('Creating new page...');
+      page = await this.browser.newPage();
+      console.log('Page created successfully');
+
       // Enhanced stealth setup
       await page.setViewport({ width: 1920, height: 1080 });
       await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
@@ -201,18 +214,39 @@ class CrawlerService {
         }
       }
     } catch (error) {
-      console.error('Error loading page:', error);
+      console.error('Error in crawlPage:', error);
+      // If browser disconnected, try to reinitialize
+      if (error.message.includes('Protocol error') || error.message.includes('Target closed')) {
+        console.log('Browser appears to be disconnected, reinitializing...');
+        this.browser = null;
+        await this.initialize();
+        throw error; // Let the retry logic handle it
+      }
       throw error;
     } finally {
-      if (page) await page.close();
+      if (page) {
+        try {
+          await page.close();
+          console.log('Page closed successfully');
+        } catch (error) {
+          console.error('Error closing page:', error);
+        }
+      }
     }
   }
 
   async cleanup() {
-    if (this.browser) {
-      await this.browser.close();
-      this.browser = null;
-      console.log('Browser closed');
+    try {
+      if (this.browser) {
+        const pages = await this.browser.pages();
+        console.log(`Closing ${pages.length} open pages...`);
+        await Promise.all(pages.map(page => page.close().catch(e => console.error('Error closing page:', e))));
+        await this.browser.close();
+        this.browser = null;
+        console.log('Browser cleanup completed');
+      }
+    } catch (error) {
+      console.error('Error during cleanup:', error);
     }
   }
 
