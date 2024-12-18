@@ -55,18 +55,17 @@ RUN mkdir -p /app/.cache/puppeteer \
     && chmod -R 777 /app/.cache/puppeteer
 
 # Copy package files
-COPY package.json yarn.lock ./
+COPY package.json package-lock.json* ./
 
 # Install dependencies
-RUN yarn config set network-timeout 300000 \
-    && yarn config set legacy-peer-deps true \
-    && yarn install --frozen-lockfile
+RUN npm config set network-timeout 300000 \
+    && npm install
 
 # Copy application files
 COPY . .
 
 # Build the application
-RUN yarn build
+RUN npm run build
 
 # Set environment variables
 ENV NODE_ENV=production
@@ -77,4 +76,4 @@ ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome-stable
 EXPOSE 3000
 
 # Start the application
-CMD ["yarn", "start"] 
+CMD ["npm", "start"] 
