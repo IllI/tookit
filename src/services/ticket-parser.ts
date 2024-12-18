@@ -36,9 +36,8 @@ export class TicketParser {
         .replace(/\s+/g, '');
       const date = this.standardizeDate(dateText, 'vividseats');
       const venue = cardContent.find('[class*="VenueName"]').text().trim();
-      const { city, state } = parseLocation(
-        cardContent.find('[class*="Location"]').text().trim()
-      );
+      const locationText = cardContent.find('[class*="Location"]').text().trim();
+      const { city, state } = parseLocation(locationText);
       const location = `${city}, ${state}`;
 
       const eventData = {
