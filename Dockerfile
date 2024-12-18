@@ -58,8 +58,8 @@ RUN mkdir -p /app/.cache/puppeteer \
 COPY package.json package-lock.json* ./
 
 # Install dependencies
-RUN npm config set network-timeout 300000 \
-    && npm install
+RUN npm config set fetch-timeout 300000 \
+    && npm install --legacy-peer-deps
 
 # Copy application files
 COPY . .
