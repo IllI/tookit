@@ -1,14 +1,11 @@
 import { createClient } from '@supabase/supabase-js';
-import puppeteer from 'puppeteer-extra';
-import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+import { firecrawlService } from './firecrawl-service';
 import { getParser } from './llm-service';
-import { TicketParser } from './ticket-parser';
-
-puppeteer.use(StealthPlugin());
+const cheerio = require('cheerio');
 
 class CrawlerService {
   constructor() {
-    this.browser = null;
+    this.firecrawl = firecrawlService;
     this.parser = getParser();
     this.maxAttempts = 3;
     this.retryDelays = [2000, 3000, 4000];
@@ -33,317 +30,289 @@ class CrawlerService {
     console.log(message);
   }
 
-  async initialize() {
-    if (!this.browser) {
-      const isProduction = process.env.NODE_ENV === 'production';
-      console.log('Initializing browser in', isProduction ? 'production' : 'development');
-      
-      const launchOptions = {
-        headless: true,
-        args: [
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-dev-shm-usage',
-          '--disable-accelerated-2d-canvas',
-          '--disable-gpu',
-          '--window-size=1920,1080',
-          '--disable-blink-features=AutomationControlled',
-          '--no-first-run',
-          '--no-zygote',
-          '--single-process',
-          '--disable-extensions',
-          '--disable-background-networking',
-          '--disable-default-apps',
-          '--disable-sync',
-          '--disable-translate',
-          '--hide-scrollbars',
-          '--metrics-recording-only',
-          '--mute-audio',
-          '--safebrowsing-disable-auto-update',
-          '--headless=new',
-          '--disable-software-rasterizer'
-        ],
-        ignoreDefaultArgs: ['--enable-automation'],
-        ignoreHTTPSErrors: true
-      };
+  async asyncCrawlSearch(searchUrl, options = {}) {
+    console.log(`Starting search crawl for: ${searchUrl}`);
+    console.log('Search options:', options);
+    let attempt = 1;
+    let response = null;
 
-      if (isProduction) {
-        console.log('Using Chrome at /usr/bin/google-chrome-stable');
-        launchOptions.executablePath = '/usr/bin/google-chrome-stable';
-      }
-
+    while (attempt <= this.maxAttempts) {
       try {
-        this.browser = await puppeteer.launch(launchOptions);
-        console.log('Browser launched successfully');
+        console.log(`Attempt ${attempt}/${this.maxAttempts} to scrape: ${searchUrl}`);
+        response = await this.firecrawl.scrapeUrl(searchUrl, options);
+        
+        if (response?.html) {
+          console.log('Search response:', {
+            hasData: !!response,
+            hasHtml: !!response?.html,
+            hasMarkdown: !!response?.markdown,
+            hasLinks: !!response?.links
+          });
+          break; // Success - exit retry loop
+        }
 
-        // Add disconnect handler
-        this.browser.on('disconnected', () => {
-          console.log('Browser disconnected');
-          this.browser = null;
-        });
+        console.log(`Attempt ${attempt} failed - no HTML in response`);
+        if (attempt === this.maxAttempts) {
+          throw new Error('Failed to get HTML content after all attempts');
+        }
+
+        // Wait before retrying
+        await new Promise(resolve => setTimeout(resolve, this.retryDelays[attempt - 1]));
+        attempt++;
 
       } catch (error) {
-        console.error('Browser initialization error:', error);
-        throw error;
+        console.error(`Error in attempt ${attempt}:`, error);
+        if (attempt === this.maxAttempts) throw error;
+        
+        // Wait before retrying
+        await new Promise(resolve => setTimeout(resolve, this.retryDelays[attempt - 1]));
+        attempt++;
       }
     }
-    return this.browser;
+
+    // Process the successful response
+    if (response?.extract?.events) {
+      return {
+        source: searchUrl.includes('stubhub') ? 'stubhub' : 'vividseats',
+        events: response.extract.events
+      };
+    }
+
+    // Return empty events array if no events found
+    return {
+      source: searchUrl.includes('stubhub') ? 'stubhub' : 'vividseats',
+      events: []
+    };
   }
 
-  async crawlPage({ url, waitForSelector, eventId }) {
-    if (!this.browser) {
-      console.log('Browser not initialized, initializing now...');
-      await this.initialize();
-    }
+  async asyncCrawlEvent(eventUrl, eventInfo) {
+    console.log(`Starting event crawl for: ${eventUrl}`);
+    let attempt = 1;
+    let response = null;
 
-    if (url.includes('search')) {
-      this.processedEvents.clear();
-      console.log('Cleared processed events for new search');
-    }
-
-    let page = null;
-    
-    try {
-      console.log('Creating new page...');
-      page = await this.browser.newPage();
-      console.log('Page created successfully');
-
-      // Enhanced stealth setup
-      await page.setViewport({ width: 1920, height: 1080 });
-      await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
-      
-      // Additional headers and webdriver settings
-      await page.setExtraHTTPHeaders({
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'sec-ch-ua': '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
-        'sec-ch-ua-mobile': '?0',
-        'sec-ch-ua-platform': '"Windows"'
-      });
-
-      // Override navigator.webdriver
-      await page.evaluateOnNewDocument(() => {
-        Object.defineProperty(navigator, 'webdriver', {
-          get: () => undefined
+    while (attempt <= this.maxAttempts) {
+      try {
+        console.log(`Attempt ${attempt}/${this.maxAttempts} to scrape event: ${eventUrl}`);
+        response = await this.firecrawl.scrapeUrl(eventUrl, {
+          javascript: true,
+          formats: ['markdown', 'html'],
+          extract: {
+            prompt: 'Find all tickets for this event and return ONLY a raw JSON object with this structure: ' +
+              `{
+                "tickets": [
+                  {
+                    "section": string,
+                    "row": string (optional),
+                    "price": number,
+                    "quantity": number,
+                    "listing_id": string (optional)
+                  }
+                ]
+              }`
+          }
         });
-        window.navigator.chrome = {
-          runtime: {}
-        };
-      });
+        
+        if (response?.html) {
+          console.log('Event response:', {
+            hasData: !!response,
+            hasHtml: !!response?.html,
+            hasMarkdown: !!response?.markdown,
+            hasExtract: !!response?.extract
+          });
+          break; // Success - exit retry loop
+        }
 
-      let attempt = 1;
-      while (attempt <= this.maxAttempts) {
+        console.log(`Attempt ${attempt} failed - no HTML in response`);
+        if (attempt === this.maxAttempts) {
+          throw new Error('Failed to get HTML content after all attempts');
+        }
+
+        // Wait before retrying
+        await new Promise(resolve => setTimeout(resolve, this.retryDelays[attempt - 1]));
+        attempt++;
+
+      } catch (error) {
+        console.error(`Error in attempt ${attempt}:`, error);
+        if (attempt === this.maxAttempts) throw error;
+        
+        // Wait before retrying
+        await new Promise(resolve => setTimeout(resolve, this.retryDelays[attempt - 1]));
+        attempt++;
+      }
+    }
+
+    // Process the successful response
+    if (response?.extract?.tickets) {
+      await this.processTicketData(
+        response.extract.tickets,
+        eventInfo.id,
+        eventUrl.includes('stubhub') ? 'stubhub' : 'vividseats'
+      );
+      return true;
+    }
+
+    // If no extract data, try parsing the HTML directly
+    if (response?.html) {
+      const partialResult = await this.parser.parseContent(
+        response.html || response.markdown || '',
+        eventUrl,
+        {},
+        true
+      );
+
+      const tickets = partialResult?.tickets || [];
+      await this.processTicketData(
+        tickets,
+        eventInfo.id,
+        eventUrl.includes('stubhub') ? 'stubhub' : 'vividseats'
+      );
+      return true;
+    }
+
+    return false;
+  }
+
+  async processEventData(parsedContent, source) {
+    const events = [];
+    
+    if (source === 'stubhub') {
+      // Parse StubHub search results
+      const eventLinks = parsedContent.links?.filter(link => 
+        link.includes('/event/') || link.includes('/tickets/')
+      ) || [];
+
+      console.log(`Found ${eventLinks.length} StubHub event links`);
+
+      // For each event link found
+      for (const link of eventLinks) {
         try {
-          // Determine source first
-          const source = url.includes('stubhub') ? 'stubhub' : 'vividseats';
-
-          // Add quantity=0 parameter to StubHub event URLs
-          const pageUrl = url.includes('stubhub.com') && !url.includes('search') 
-            ? `${url}${url.includes('?') ? '&' : '?'}quantity=0` 
-            : url;
-
-          console.log(`Attempt ${attempt}/${this.maxAttempts} to load: ${pageUrl}`);
+          // Use markdown since it's cleaner than HTML
+          const eventText = parsedContent.markdown;
           
-          await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+          // Extract event details using patterns from ticket-parser.ts
+          const dateMatch = eventText.match(/([A-Z][a-z]{2}\s+\d{1,2}\s+\d{4})/);
+          const timeMatch = eventText.match(/(\d{1,2}:\d{2}\s*[AP]M)/i);
+          const locationMatch = eventText.match(/([^,]+),\s*([A-Z]{2}),\s*([A-Z]+)/);
           
-          // Wait for content to load based on page type
-          if (url.includes('vividseats.com')) {
-            console.log('Waiting for VividSeats content...');
-            if (url.includes('search') || url.includes('/search/')) {
-              await page.waitForSelector('[data-testid="#app"]', { timeout: 5000 });
-            } else {
-              await page.waitForSelector('[data-testid="listings-container"]', { timeout: 5000 });
-            }
-          } else if (url.includes('stubhub.com')) {
-            console.log('Waiting for StubHub content...');
-            if (url.includes('search') || url.includes('/secure/search')) {
-              await page.waitForSelector('#app', { timeout: 5000 });
-              await page.waitForSelector('a[href*="/event/"]', { timeout: 5000 });
-            } else {
-              await page.waitForSelector('#listings-container', { timeout: 5000 });
-            }
+          if (dateMatch && locationMatch) {
+            const eventData = {
+              name: eventText.split('\n').find(line => 
+                !line.includes('PM') && 
+                !line.includes('AM') && 
+                !line.includes('202') && 
+                line.length > 0
+              )?.trim(),
+              date: dateMatch[1],
+              time: timeMatch?.[1],
+              // Get venue from the line that appears right before the location
+              venue: eventText.split('\n')
+                .find((line, i, arr) => 
+                  arr[i + 1]?.includes(locationMatch[0]) && 
+                  line.length > 0 && 
+                  !line.includes(dateMatch[0])
+                )?.trim(),
+              city: locationMatch[1]?.trim(),
+              state: locationMatch[2],
+              country: locationMatch[3]
+            };
+
+            events.push({
+              name: eventData.name,
+              date: new Date(`${eventData.date} ${eventData.time}`).toISOString(),
+              venue: eventData.venue || 'Unknown Venue',
+              city: eventData.city || 'Unknown City',
+              state: eventData.state,
+              country: eventData.country === 'USA' ? 'USA' : 'CAN',
+              eventUrl: link.split('?')[0] // Remove query params
+            });
+          }
+        } catch (error) {
+          console.error('Error parsing StubHub event:', error);
+        }
+      }
+    } else if (source === 'vividseats') {
+      // Use cheerio to parse HTML
+      const $ = cheerio.load(parsedContent.html);
+      
+      // Get all event rows
+      $('[data-testid^="production-listing-row-"]').each((_, row) => {
+        try {
+          const $row = $(row);
+
+          // Skip parking events
+          const title = $row.find('.styles_titleTruncate__XiZ53').text();
+          if (!title || title.toLowerCase().includes('parking')) {
+            return;
           }
 
-          await page.waitForTimeout(1000);
+          // Get date components
+          const dateElement = $row.find('[data-testid="date-time-left-element"]');
+          const month = dateElement.find('.MuiTypography-small-bold').first().text(); // "Mar 21"
+          const year = dateElement.find('.MuiTypography-small-bold').last().text(); // "2025"
+          const time = dateElement.find('.MuiTypography-caption').text(); // "7:00pm"
 
-          const content = await page.evaluate(() => ({
-            text: document.body.innerText,
-            html: document.documentElement.outerHTML,
-            title: document.title,
-            url: window.location.href
-          }));
+          // Get venue and location
+          const subtitleElement = $row.find('[data-testid="subtitle"]');
+          const [venue, location] = subtitleElement.text().split('•').map(s => s.trim()) || [];
+          const [city, state] = location.split(',').map(s => s.trim()) || [];
 
-          // Better search page detection
-          const isSearchPage = url.includes('search') || 
-                             url.includes('/secure/search') || 
-                             url.includes('/search/');
-          
-          console.log('Page type:', {
-            url,
-            isSearchPage,
-            source,
-            hasEventId: !!eventId
+          // Get event URL
+          const eventUrl = $row.closest('a').attr('href');
+          if (!eventUrl) return;
+
+          events.push({
+            name: title,
+            date: new Date(`${month} ${year} ${time}`).toISOString(),
+            venue: venue || 'Unknown Venue',
+            city: city || 'Unknown City',
+            state: state?.replace('IL', 'Illinois'),
+            country: 'USA',
+            eventUrl: `https://www.vividseats.com${eventUrl}`
           });
 
-          const parser = new TicketParser(content.html, source);
-          const parsedContent = isSearchPage 
-            ? parser.parseSearchResults()
-            : parser.parseEventTickets();
-
-          // Process events if this was a search page
-          if (isSearchPage && parsedContent?.events) {
-            await this.processEventData(parsedContent, source);
-          } 
-          // Process tickets if this was an event page
-          else if (!isSearchPage && eventId) {
-            const tickets = parsedContent?.tickets || [];
-            console.log(`Found ${tickets.length} tickets to process`);
-            await this.processTicketData(tickets, eventId, source);
-          }
-
-          return {
-            ...content,
-            parsedContent
-          };
-
         } catch (error) {
-          console.error(`Attempt ${attempt} failed:`, error.message);
-          if (attempt === this.maxAttempts) throw error;
-          attempt++;
-          await new Promise(resolve => setTimeout(resolve, this.retryDelays[attempt - 1]));
+          console.error('Error parsing VividSeats event:', error);
         }
-      }
-    } catch (error) {
-      console.error('Error in crawlPage:', error);
-      // If browser disconnected, try to reinitialize
-      if (error.message.includes('Protocol error') || error.message.includes('Target closed')) {
-        console.log('Browser appears to be disconnected, reinitializing...');
-        this.browser = null;
-        await this.initialize();
-        throw error; // Let the retry logic handle it
-      }
-      throw error;
-    } finally {
-      if (page) {
-        try {
-          await page.close();
-          console.log('Page closed successfully');
-        } catch (error) {
-          console.error('Error closing page:', error);
-        }
-      }
-    }
-  }
-
-  async cleanup() {
-    try {
-      if (this.browser) {
-        const pages = await this.browser.pages();
-        console.log(`Closing ${pages.length} open pages...`);
-        await Promise.all(pages.map(page => page.close().catch(e => console.error('Error closing page:', e))));
-        await this.browser.close();
-        this.browser = null;
-        console.log('Browser cleanup completed');
-      }
-    } catch (error) {
-      console.error('Error during cleanup:', error);
-    }
-  }
-
-  async processEventData(parsedEvents, source) {
-    if (!parsedEvents?.events?.length) {
-      this.sendStatus(`No events found for ${source}`);
-      return;
+      });
     }
 
-    // Process each event one at a time
-    for (const event of parsedEvents.events) {
+    // Process each event
+    for (const event of events) {
       try {
-        // Track if we've seen this event before
-        const eventKey = `${event.name}-${event.venue}-${event.date}`;
-        const seenBefore = this.processedEvents.has(eventKey);
-        this.processedEvents.add(eventKey);
-
-        // Check for existing event with fuzzy name matching
+        // Check for existing event
         const { data: existingEvents } = await this.supabase
           .from('events')
-          .select('id, name, date, venue, city')
+          .select('id, name, date, venue')
           .eq('city', event.city)
           .eq('state', event.state);
 
         let eventId = null;
 
-        // Find matching event considering similar names and close dates
-        if (existingEvents?.length) {
-          const matchingEvent = existingEvents.find(existing => {
-            const existingDate = new Date(existing.date);
-            const eventDate = new Date(event.date);
-            const timeDiff = Math.abs(existingDate.getTime() - eventDate.getTime());
-            const hoursDiff = timeDiff / (1000 * 60 * 60);
-            
-            // Consider events matching if:
-            // 1. Names are similar
-            // 2. Within 24 hours
-            // 3. Same city (even if venue differs)
-            const namesSimilar = this.areNamesSimilar(existing.name, event.name);
-            return hoursDiff <= 24 && namesSimilar;
+        // Find matching event
+        const matchingEvent = existingEvents?.find(existing => {
+          const existingDate = new Date(existing.date);
+          const eventDate = new Date(event.date);
+          const timeDiff = Math.abs(existingDate.getTime() - eventDate.getTime());
+          const hoursDiff = timeDiff / (1000 * 60 * 60);
+          
+          return hoursDiff <= 24 && this.areNamesSimilar(existing.name, event.name);
+        });
+
+        if (matchingEvent) {
+          eventId = matchingEvent.id;
+          console.log('Found matching event:', {
+            name: matchingEvent.name,
+            venue: matchingEvent.venue
           });
 
-          if (matchingEvent) {
-            eventId = matchingEvent.id;
-            console.log('Found matching event:', {
-              name: matchingEvent.name,
-              venue: matchingEvent.venue,
-              matchedWith: {
-                name: event.name,
-                venue: event.venue
-              }
-            });
-          }
-        }
-
-        // Only create new event if we haven't seen it before
-        if (!eventId && !seenBefore) {
-          // Create new event
-          const { data: newEvent, error: eventError } = await this.supabase
-            .from('events')
-            .insert([{
-              name: event.name,
-              date: event.date,
-              venue: event.venue,
-              city: event.city,
-              state: event.state,
-              country: event.country,
-              location: event.location,
-              source: event.source,
-              source_url: event.source_url
-            }])
-            .select()
-            .single();
-
-          if (eventError || !newEvent) {
-            console.error('Failed to create event:', eventError);
-            continue;
-          }
-
-          eventId = newEvent.id;
-          console.log('Created new event:', event.name);
-        }
-
-        // Always update event link, whether the event is new or existing
-        if (eventId) {
-          // Check for existing event links - allow multiple per source
+          // Add source link if it doesn't exist
           const { data: existingLinks } = await this.supabase
             .from('event_links')
             .select('url')
             .eq('event_id', eventId)
             .eq('source', source);
 
-          // Check if this exact URL already exists
-          const hasLink = existingLinks?.some(link => link.url === event.eventUrl);
-
-          if (!hasLink) {
-            console.log(`Adding new ${source} link for event`);
+          if (!existingLinks?.length && event.eventUrl) {
             await this.supabase
               .from('event_links')
               .insert({
@@ -351,32 +320,38 @@ class CrawlerService {
                 source,
                 url: event.eventUrl
               });
-          } else {
-            console.log(`Event link for ${source} already exists`);
+          }
+        } else {
+          // Create new event
+          const { data: newEvent, error: insertError } = await this.supabase
+            .from('events')
+            .insert({
+              name: event.name,
+              date: event.date,
+              venue: event.venue,
+              city: event.city,
+              state: event.state,
+              country: event.country
+            })
+            .select()
+            .single();
+
+          if (insertError) {
+            console.error('Error inserting event:', insertError);
+            continue;
+          }
+
+          if (newEvent && event.eventUrl) {
+            eventId = newEvent.id;
+            await this.supabase
+              .from('event_links')
+              .insert({
+                event_id: eventId,
+                source,
+                url: event.eventUrl
+              });
           }
         }
-
-        // Visit event page to scrape tickets
-        if (event.eventUrl && eventId) {
-          this.sendStatus(`Fetching tickets for ${event.name}...`);
-          
-          try {
-            await new Promise(resolve => setTimeout(resolve, 2000));
-            
-            await this.crawlPage({
-              url: event.eventUrl,
-              eventId,
-              waitForSelector: source === 'stubhub' ? '#listings-container' : '[data-testid="listings-container"]'
-            });
-
-          } catch (pageError) {
-            console.error('Error visiting event page:', {
-              url: event.eventUrl,
-              error: pageError.message
-            });
-          }
-        }
-
       } catch (error) {
         console.error('Error processing event:', error);
       }

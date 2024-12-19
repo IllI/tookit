@@ -8,7 +8,8 @@ import { config } from '@/src/config/env';
 
 export class SearchService extends EventEmitter {
   private supabase;
-
+  private processedEvents = new Map(); // Track processed events
+  
   constructor() {
     super();
     crawlerService.setSearchService(this);
@@ -16,6 +17,97 @@ export class SearchService extends EventEmitter {
       config.supabase.url,
       config.supabase.serviceKey || config.supabase.anonKey
     );
+  }
+
+  // Helper to safely parse dates
+  private parseDateSafely(dateStr: string): Date {
+    try {
+      const date = new Date(dateStr);
+      // Check if date is valid
+      if (isNaN(date.getTime())) {
+        throw new Error('Invalid date');
+      }
+      return date;
+    } catch (error) {
+      console.error('Date parsing error:', error);
+      return new Date(); // Return current date as fallback
+    }
+  }
+
+  // Helper to track processed events
+  private async trackEvent(event: any, source: string) {
+    const eventKey = `${event.venue}-${event.name}-${event.date}`.toLowerCase().replace(/[^a-z0-9]/g, '');
+    console.log('Checking event:', {
+      key: eventKey,
+      alreadyProcessed: this.processedEvents.has(eventKey),
+      source: source
+    });
+    
+    if (!this.processedEvents.has(eventKey)) {
+      // First time seeing this event
+      const { data: existingEvents, error } = await this.supabase
+        .from('events')
+        .select(`
+          id,
+          name,
+          date,
+          venue,
+          event_links(
+            source,
+            url
+          )
+        `)
+        .ilike('venue', `%${event.venue}%`)
+        .gte('date', new Date(this.parseDateSafely(event.date).getTime() - (24 * 60 * 60 * 1000)).toISOString())
+        .lte('date', new Date(this.parseDateSafely(event.date).getTime() + (24 * 60 * 60 * 1000)).toISOString());
+
+      if (error) {
+        console.error('Error checking for existing event:', error);
+        return null;
+      }
+
+      console.log('Found potential matches:', existingEvents?.length || 0);
+
+      const matchingEvent = existingEvents?.find(existing => {
+        const normalizedExistingName = existing.name.toLowerCase().replace(/[^a-z0-9]/g, '');
+        const normalizedNewName = event.name.toLowerCase().replace(/[^a-z0-9]/g, '');
+        const nameMatch = normalizedExistingName.includes(normalizedNewName) || 
+                         normalizedNewName.includes(normalizedExistingName);
+        
+        if (nameMatch) {
+          console.log('Found name match:', {
+            existing: existing.name,
+            new: event.name,
+            venue: existing.venue,
+            date: existing.date
+          });
+        }
+        
+        return nameMatch;
+      });
+
+      if (matchingEvent) {
+        console.log('Tracking existing event:', {
+          id: matchingEvent.id,
+          name: matchingEvent.name,
+          existingLinks: matchingEvent.event_links.map(link => link.source)
+        });
+        
+        this.processedEvents.set(eventKey, {
+          id: matchingEvent.id,
+          links: new Set(matchingEvent.event_links.map(link => link.source))
+        });
+      } else {
+        console.log('No matching event found in database');
+      }
+    } else {
+      console.log('Event already tracked:', {
+        key: eventKey,
+        trackedInfo: this.processedEvents.get(eventKey)
+      });
+    }
+
+    return this.processedEvents.get(eventKey);
   }
 
   async searchAll(params: SearchParams) {
@@ -42,9 +134,6 @@ export class SearchService extends EventEmitter {
       // If we found existing events, update their tickets and return
       if (existingEvents?.length) {
         this.emit('status', `Found ${existingEvents.length} existing events. Updating tickets...`);
-        
-        // Initialize crawler for updating existing events
-        await crawlerService.initialize();
         
         try {
           for (const event of existingEvents) {
@@ -112,31 +201,165 @@ export class SearchService extends EventEmitter {
             metadata: { totalTickets: formattedTickets.length }
           };
         } finally {
-          await crawlerService.cleanup();
+          // await crawlerService.cleanup();
         }
       }
 
       // If no existing events found, proceed with new search
       this.emit('status', 'No existing events found. Starting new search...');
       
-      // Initialize crawler for new searches
-      this.emit('status', 'Setting up browser...');
-      await crawlerService.initialize();
-
-      // Run new searches in parallel
+      // Run new searches
       this.emit('status', 'Searching for new events...');
-      await Promise.all([
-        this.searchVividSeats(params).catch(error => {
-          console.error('VividSeats search failed:', error);
-          this.emit('status', 'VividSeats search failed');
-          return [];
-        }),
-        this.searchStubHub(params).catch(error => {
-          console.error('StubHub search failed:', error);
-          this.emit('status', 'StubHub search failed');
-          return [];
-        })
+      const combinedQuery = [params.keyword, params.location].filter(Boolean).join(' ');
+
+      // Collect all search results with explicit source identification
+      const [stubHubResults, vividSeatsResults] = await Promise.all([
+        crawlerService.asyncCrawlSearch(
+          `https://www.stubhub.com/secure/search?q=${encodeURIComponent(combinedQuery)}`,
+          {
+            formats: ['markdown', 'html', 'links', 'extract'],
+            includeTags: ['[data-testid="primaryGrid"] a'],
+            extract: {
+              prompt: 'Find all events that match the search query ' + combinedQuery +
+                ' and return ONLY a raw JSON object. No explanations, no notes, no markdown. Return only valid JSON matching this structure: ' +
+                `{
+          "events": [
+            {
+              "name": string,
+              "date": string (format: "YYYY-MM-DDTHH:mm:ssZ"),
+              "venue": string,
+              "city": string,
+              "state": string,
+              "country": string,
+              "location": string,
+              "price": string (optional),
+              "eventUrl": string (must be the exact href value from the event's <a> tag, including domain)
+            }
+          ]
+        }`
+            }
+          }
+        ).then(result => ({ ...result, source: 'stubhub' })),
+        crawlerService.asyncCrawlSearch(
+          `https://www.vividseats.com/search?searchTerm=${encodeURIComponent(combinedQuery)}`,
+          {
+            formats: ['markdown', 'html', 'links', 'extract'],
+            includeTags: ['[data-testid="productions-list"] a'],
+            extract: {
+              prompt: 'Find all events that match the search query ' + combinedQuery +
+                ' and return ONLY a raw JSON object. No explanations, no notes, no markdown. Return only valid JSON matching this structure: ' +
+                `{
+          "events": [
+            {
+              "name": string,
+              "date": string (format: "YYYY-MM-DDTHH:mm:ssZ"),
+              "venue": string,
+              "city": string,
+              "state": string,
+              "country": string,
+              "location": string,
+              "price": string (optional),
+              "eventUrl": string (must be the exact href value from the event's <a> tag, including domain)
+            }
+          ]
+        }`
+            }
+          }
+        ).then(result => ({ ...result, source: 'vividseats' }))
       ]);
+
+      // Insert new events into database
+      for (const result of [stubHubResults, vividSeatsResults]) {
+        console.log(`Processing events from source: ${result.source}`);
+        for (const event of result.events) {
+          try {
+            // Skip parking events
+            if (event.name.toLowerCase().includes('parking')) {
+              console.log('Skipping parking event:', event.name);
+              continue;
+            }
+
+            // Check if we've processed this event before
+            const trackedEvent = await this.trackEvent(event, result.source);
+
+            if (trackedEvent) {
+              // Event exists, check if we need to add the source link
+              if (!trackedEvent.links.has(result.source)) {
+                console.log(`Adding ${result.source} link to existing event:`, trackedEvent.id);
+                const { error: linkError } = await this.supabase
+                  .from('event_links')
+                  .insert({
+                    event_id: trackedEvent.id,
+                    source: result.source,
+                    url: event.eventUrl
+                  });
+
+                if (linkError) {
+                  console.error(`Error adding ${result.source} link:`, linkError);
+                } else {
+                  console.log(`Successfully added ${result.source} link to event ${trackedEvent.id}`);
+                  trackedEvent.links.add(result.source);
+                }
+              }
+
+              // Crawl for tickets
+             // await crawlerService.asyncCrawlEvent(event.eventUrl, { id: trackedEvent.id });
+
+            } else {
+              // Create new event
+              console.log('Creating new event:', {
+                name: event.name,
+                venue: event.venue,
+                date: event.date
+              });
+
+              const { data: newEvent, error: insertError } = await this.supabase
+                .from('events')
+                .insert({
+                  name: event.name,
+                  date: this.parseDateSafely(event.date),
+                  venue: event.venue,
+                  city: event.city,
+                  state: event.state,
+                  country: event.country || 'USA'
+                })
+                .select()
+                .single();
+
+              if (insertError) {
+                console.error('Error inserting event:', insertError);
+                continue;
+              }
+
+              if (newEvent) {
+                // Add to tracked events
+                this.processedEvents.set(
+                  `${event.venue}-${event.name}-${event.date}`.toLowerCase().replace(/[^a-z0-9]/g, ''),
+                  {
+                    id: newEvent.id,
+                    links: new Set([result.source])
+                  }
+                );
+
+                // Add event link
+                await this.supabase
+                  .from('event_links')
+                  .insert({
+                    event_id: newEvent.id,
+                    source: result.source,
+                    url: event.eventUrl
+                  });
+
+                // Crawl for tickets
+               //await crawlerService.asyncCrawlEvent(event.eventUrl, { id: newEvent.id });
+              }
+            }
+
+          } catch (error) {
+            console.error('Error processing event:', error);
+          }
+        }
+      }
 
       // After all searches complete, fetch all tickets from database
       this.emit('status', 'Fetching final ticket list...');
@@ -220,43 +443,15 @@ export class SearchService extends EventEmitter {
       this.emit('error', error instanceof Error ? error.message : 'Search failed');
       throw error;
     } finally {
-      await crawlerService.cleanup();
+      // await crawlerService.cleanup();
     }
   }
 
-  private async searchStubHub(params: SearchParams) {
-    this.emit('status', 'Searching StubHub...');
-    const stubHubSearcher = new StubHubSearcher();
-    const events = await stubHubSearcher.searchConcerts(
-      params.keyword,
-      undefined,
-      params.location
-    );
-    
-    if (events.length) {
-      this.emit('status', `Found ${events.length} events on StubHub`);
-    } else {
-      this.emit('status', 'No events found on StubHub');
-    }
-    
-    return events;
-  }
+  // private async searchStubHub(params: SearchParams) {
+  //   // Remove old StubHub search implementation
+  // }
 
-  private async searchVividSeats(params: SearchParams) {
-    this.emit('status', 'Searching VividSeats...');
-    const vividSeatsSearcher = new VividSeatsSearcher();
-    const events = await vividSeatsSearcher.searchConcerts(
-      params.keyword,
-      undefined,
-      params.location
-    );
-    
-    if (events.length) {
-      this.emit('status', `Found ${events.length} events on VividSeats`);
-    } else {
-      this.emit('status', 'No events found on VividSeats');
-    }
-    
-    return events;
-  }
+  // private async searchVividSeats(params: SearchParams) {
+  //   // Remove old VividSeats search implementation
+  // }
 } 
