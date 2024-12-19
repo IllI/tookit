@@ -141,67 +141,32 @@ export class SearchService extends EventEmitter {
               this.emit('status', `Updating tickets for ${event.name} from ${link.source}...`);
               
               // Get current tickets from source
-              await crawlerService.crawlPage({
-                url: link.url,
-                eventId: event.id
-              });
+              const crawlOptions = {
+                formats: ['markdown', 'html', 'links', 'extract'],
+                includeTags: link.source === 'stubhub' 
+                  ? ['[data-listing-id]', '[data-testid*="listing"]']
+                  : ['[data-testid="listings-container"]'],
+                extract: {
+                  prompt: 'Find all tickets for this event and return ONLY a raw JSON object with this structure: ' +
+                    `{
+                      "tickets": [
+                        {
+                          "section": string,
+                          "row": string (optional),
+                          "price": number,
+                          "quantity": number,
+                          "listing_id": string (optional)
+                        }
+                      ]
+                    }`
+                }
+              };
+
+              await crawlerService.asyncCrawlEvent(link.url, { id: event.id }, crawlOptions);
             }
           }
-
-          // After updating tickets, fetch all current tickets
-          const { data: tickets, error } = await this.supabase
-            .from('tickets')
-            .select(`
-              id,
-              event_id,
-              section,
-              row,
-              price,
-              quantity,
-              source,
-              listing_id,
-              event:events!inner(
-                id,
-                name,
-                date,
-                venue,
-                event_links!inner(
-                  source,
-                  url
-                )
-              )
-            `)
-            .order('price');
-
-          if (error) throw error;
-
-          // Format and return the tickets
-          const formattedTickets = tickets?.map(ticket => {
-            const eventLink = ticket.event?.event_links?.find(
-              link => link.source === ticket.source
-            );
-
-            return {
-              ...ticket,
-              price: parseFloat(ticket.price) || 0,
-              event: ticket.event ? {
-                ...ticket.event,
-                date: ticket.event.date ? new Date(ticket.event.date).toLocaleString() : 'Date TBD',
-                url: eventLink?.url
-              } : null
-            };
-          }) || [];
-
-          this.emit('status', `Found ${formattedTickets.length} total tickets`);
-          this.emit('tickets', formattedTickets);
-          
-          return {
-            success: true,
-            data: formattedTickets,
-            metadata: { totalTickets: formattedTickets.length }
-          };
-        } finally {
-          // await crawlerService.cleanup();
+        } catch (error) {
+          console.error('Error updating existing events:', error);
         }
       }
 
@@ -282,6 +247,12 @@ export class SearchService extends EventEmitter {
             // Check if we've processed this event before
             const trackedEvent = await this.trackEvent(event, result.source);
 
+            // Extract the full URL, handling cases where links array might not exist
+            let fullEventUrl = event.eventUrl;
+            if (result.source === 'vividseats' && !event.eventUrl.startsWith('http')) {
+              fullEventUrl = `https://www.vividseats.com${event.eventUrl}`;
+            }
+
             if (trackedEvent) {
               // Event exists, check if we need to add the source link
               if (!trackedEvent.links.has(result.source)) {
@@ -291,7 +262,7 @@ export class SearchService extends EventEmitter {
                   .insert({
                     event_id: trackedEvent.id,
                     source: result.source,
-                    url: event.eventUrl
+                    url: fullEventUrl
                   });
 
                 if (linkError) {
@@ -301,9 +272,33 @@ export class SearchService extends EventEmitter {
                   trackedEvent.links.add(result.source);
                 }
               }
-
-              // Crawl for tickets
-             // await crawlerService.asyncCrawlEvent(event.eventUrl, { id: trackedEvent.id });
+              const selectors = result.source === 'stubhub' 
+              ? [`[data-listing-id] [data-testid*="listing"]`]
+              : [`[data-testid="listings-container"]`];
+              // Crawl for tickets with source-specific options
+              const crawlOptions = {
+                formats: ['markdown', 'html', 'links', 'extract'],
+                includeTags: selectors,
+                extract: {
+                  prompt: 'Find all tickets for this event and return ONLY a raw JSON object with this structure: ' +
+                    `{
+                      "tickets": [
+                        {
+                          "section": string,
+                          "row": string (optional),
+                          "price": number,
+                          "quantity": number,
+                          "listing_id": string (optional)
+                        }
+                      ]
+                    }`
+                }
+              };
+              
+              // Crawl for tickets with options
+              await crawlerService.asyncCrawlEvent(fullEventUrl, { 
+                id: trackedEvent.id 
+              }, crawlOptions);
 
             } else {
               // Create new event
@@ -347,11 +342,36 @@ export class SearchService extends EventEmitter {
                   .insert({
                     event_id: newEvent.id,
                     source: result.source,
-                    url: event.eventUrl
+                    url: fullEventUrl
                   });
+                  const selectors = result.source === 'stubhub' 
+                  ? ['[data-listing-id] [data-testid*="listing"]']
+                  : ['[data-testid="listings-container"]'];
 
-                // Crawl for tickets
-               //await crawlerService.asyncCrawlEvent(event.eventUrl, { id: newEvent.id });
+                // Crawl for tickets with source-specific options
+                const crawlOptions = {
+                  formats: ['markdown', 'rawHtml', 'links', 'extract'],
+                  includeTags: selectors,
+                  extract: {
+                    prompt: 'Find all tickets for this event and return ONLY a raw JSON object with this structure: ' +
+                      `{
+                        "tickets": [
+                          {
+                            "section": string,
+                            "row": string (optional),
+                            "price": number,
+                            "quantity": number,
+                            "listing_id": string (optional)
+                          }
+                        ]
+                      }`
+                  }
+                };
+
+                // Crawl for tickets with options
+                await crawlerService.asyncCrawlEvent(fullEventUrl, { 
+                  id: newEvent.id 
+                }, crawlOptions);
               }
             }
 

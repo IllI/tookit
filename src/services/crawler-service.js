@@ -85,7 +85,7 @@ class CrawlerService {
     };
   }
 
-  async asyncCrawlEvent(eventUrl, eventInfo) {
+  async asyncCrawlEvent(eventUrl, eventInfo, options = {}) {
     console.log(`Starting event crawl for: ${eventUrl}`);
     let attempt = 1;
     let response = null;
@@ -93,24 +93,7 @@ class CrawlerService {
     while (attempt <= this.maxAttempts) {
       try {
         console.log(`Attempt ${attempt}/${this.maxAttempts} to scrape event: ${eventUrl}`);
-        response = await this.firecrawl.scrapeUrl(eventUrl, {
-          javascript: true,
-          formats: ['markdown', 'html'],
-          extract: {
-            prompt: 'Find all tickets for this event and return ONLY a raw JSON object with this structure: ' +
-              `{
-                "tickets": [
-                  {
-                    "section": string,
-                    "row": string (optional),
-                    "price": number,
-                    "quantity": number,
-                    "listing_id": string (optional)
-                  }
-                ]
-              }`
-          }
-        });
+        response = await this.firecrawl.scrapeUrl(eventUrl, options);
         
         if (response?.html) {
           console.log('Event response:', {
@@ -398,15 +381,23 @@ class CrawlerService {
         ticketArray = [tickets];
       }
 
-      // Filter out invalid tickets
-      ticketArray = ticketArray.filter(ticket => 
-        ticket && 
-        (typeof ticket.price !== 'undefined') && 
-        ticket.section
-      );
+      // Filter out invalid tickets and deduplicate based on section, row, and price
+      const seenTickets = new Set();
+      ticketArray = ticketArray.filter(ticket => {
+        if (!ticket || typeof ticket.price === 'undefined' || !ticket.section) {
+          return false;
+        }
+        
+        const key = `${ticket.section}-${ticket.row || ''}-${ticket.price}`;
+        if (seenTickets.has(key)) {
+          return false;
+        }
+        seenTickets.add(key);
+        return true;
+      });
 
       const ticketCount = ticketArray.length;
-      console.log(`Found ${ticketCount} valid tickets for ${source}`);
+      console.log(`Found ${ticketCount} unique valid tickets for ${source}`);
       this.sendStatus(`Processing ${ticketCount} tickets for ${source}`);
 
       if (ticketCount === 0) {
@@ -431,30 +422,39 @@ class CrawlerService {
         sold: false
       }));
 
-      // Save to database - update onConflict to match the unique constraint
-      const { data, error } = await this.supabase
-        .from('tickets')
-        .upsert(ticketData, { 
-          onConflict: 'event_id,section,row,price',
-          returning: true 
-        });
+      // Process tickets in smaller batches to avoid conflicts
+      const batchSize = 50;
+      const results = [];
 
-      if (error) {
-        console.error('Database error:', error);
-        throw error;
+      for (let i = 0; i < ticketData.length; i += batchSize) {
+        const batch = ticketData.slice(i, i + batchSize);
+        const { data, error } = await this.supabase
+          .from('tickets')
+          .upsert(batch, { 
+            onConflict: 'event_id,section,row,price',
+            returning: true 
+          });
+
+        if (error) {
+          console.error('Database error in batch:', error);
+          continue;
+        }
+
+        if (data) {
+          results.push(...data);
+        }
       }
 
       // Log the actual data returned
       console.log('Database response:', {
-        inserted: data?.length || 0,
+        inserted: results.length,
         attempted: ticketData.length
       });
 
-      const savedCount = data?.length || ticketData.length; // Use ticketData length as fallback
-      console.log(`Successfully saved ${savedCount} tickets for ${source} event ${eventId}`);
-      this.sendStatus(`Saved ${savedCount} tickets for ${source}`);
+      console.log(`Successfully saved ${results.length} tickets for ${source} event ${eventId}`);
+      this.sendStatus(`Saved ${results.length} tickets for ${source}`);
 
-      return savedCount;
+      return results.length;
 
     } catch (error) {
       console.error(`Failed to process tickets for ${source}:`, error);
