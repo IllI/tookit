@@ -4,11 +4,14 @@ FROM node:18-alpine AS builder
 # Set working directory
 WORKDIR /app
 
+# Install necessary build tools
+RUN apk add --no-cache python3 make g++ git
+
 # Copy package files
 COPY package*.json ./
 
 # Install dependencies including dev dependencies
-RUN npm ci
+RUN npm install
 
 # Copy all files
 COPY . .
