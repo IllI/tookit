@@ -1,50 +1,76 @@
-import { createClient } from '@supabase/supabase-js';
-import puppeteer from 'puppeteer';
-import { addExtra } from 'puppeteer-extra';
-import StealthPlugin from 'puppeteer-extra-plugin-stealth';
-import UserAgent from 'user-agents';
-import { BaseService } from './base-service';
-import { getParser } from './llm-service';
-import { TicketParser } from './ticket-parser';
+import puppeteer from 'puppeteer-core';
+import type { Browser, Page } from 'puppeteer-core';
+import { BrowserFinder } from '../utils/browser-finder';
+import { parserService } from './parser-service';
+import type { Event } from '@/lib/types/schemas';
 
-// Create the browser with stealth
-const puppeteerExtra = addExtra(puppeteer);
-puppeteerExtra.use(StealthPlugin());
+class CrawlerError extends Error {
+  constructor(
+    message: string,
+    public readonly code: string,
+    public readonly details?: any
+  ) {
+    super(message);
+    this.name = 'CrawlerError';
+  }
+}
 
-class CrawlerService extends BaseService {
-  private browser: puppeteer.Browser | null = null;
-  private parser: ReturnType<typeof getParser>;
-  private maxAttempts: number = 3;
-  private retryDelays: number[] = [2000, 5000, 8000];
-  private processedEvents: Set<string> = new Set();
-  private supabase;
-  private static _instance: CrawlerService;
+class CrawlerService {
+  private browser: Browser | null = null;
+  private readonly maxAttempts = 3;
+  private readonly retryDelays = [2000, 3000, 4000];
+  private searchService: any = null;
 
-  constructor() {
-    super();
-    if (CrawlerService._instance) {
-      return CrawlerService._instance;
-    }
-
-    this.parser = getParser();
-    this.supabase = createClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-    );
-    CrawlerService._instance = this;
+  setSearchService(service: any) {
+    this.searchService = service;
   }
 
-  static getInstance(): CrawlerService {
-    if (!CrawlerService._instance) {
-      CrawlerService._instance = new CrawlerService();
+  sendStatus(message: string) {
+    if (this.searchService) {
+      this.searchService.emit('status', message);
     }
-    return CrawlerService._instance;
+    console.log(message);
   }
 
-  async initialize(): Promise<puppeteer.Browser> {
-    if (!this.browser) {
-      const launchOptions: puppeteer.LaunchOptions = {
-        headless: true,
+  private async setupPage(page: Page) {
+    await page.setViewport({ width: 1920, height: 1080 });
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
+    
+    await page.setExtraHTTPHeaders({
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+      'sec-ch-ua': '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+      'sec-ch-ua-mobile': '?0',
+      'sec-ch-ua-platform': '"Windows"'
+    });
+
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, 'webdriver', {
+        get: () => undefined
+      });
+      window.navigator.chrome = {
+        runtime: {}
+      };
+    });
+  }
+
+  async initialize(): Promise<{ browser: Browser }> {
+    if (this.browser) {
+      return { browser: this.browser };
+    }
+
+    try {
+      const browserInfo = await BrowserFinder.findChrome();
+      if (!browserInfo) {
+        throw new CrawlerError(
+          BrowserFinder.getBrowserNotFoundMessage(),
+          'BROWSER_NOT_FOUND'
+        );
+      }
+
+      const launchOptions = {
+        headless: 'new' as const,
+        executablePath: browserInfo.executablePath,
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',
@@ -57,110 +83,111 @@ class CrawlerService extends BaseService {
         ignoreDefaultArgs: ['--enable-automation']
       };
 
-      try {
-        this.browser = await puppeteerExtra.launch(launchOptions);
-        console.log('Browser initialized with stealth');
-      } catch (error) {
-        console.error('Browser initialization error:', error);
-        throw error;
-      }
+      this.browser = await puppeteer.launch(launchOptions);
+      console.log(`Browser initialized (${browserInfo.type})`);
+      return { browser: this.browser };
+
+    } catch (error) {
+      if (error instanceof CrawlerError) throw error;
+      throw new CrawlerError(
+        'Failed to initialize browser',
+        'BROWSER_INIT_FAILED',
+        error
+      );
     }
-    return this.browser;
   }
 
-  async crawlPage({ url, waitForSelector, eventId }: { url: string; waitForSelector?: string; eventId?: string }) {
-    if (url.includes('search')) {
-      this.processedEvents.clear();
-      console.log('Cleared processed events for new search');
+  async crawlPage(url: string): Promise<Event> {
+    if (!url || typeof url !== 'string') {
+      throw new CrawlerError(
+        'Invalid URL provided',
+        'INVALID_URL'
+      );
     }
 
-    let page = null;
+    const { browser } = await this.initialize();
     let context = null;
+    let page = null;
+    let attempt = 1;
 
     try {
-      const browser = await this.initialize();
       context = await browser.createIncognitoBrowserContext();
       page = await context.newPage();
-      
-      const userAgent = new UserAgent({ deviceCategory: 'desktop' });
-      await page.setUserAgent(userAgent.toString());
-      
-      await page.setViewport({ 
-        width: 1920 + Math.floor(Math.random() * 100),
-        height: 1080 + Math.floor(Math.random() * 100)
-      });
+      await this.setupPage(page);
 
-      await page.setDefaultNavigationTimeout(60000);
-      await page.setDefaultTimeout(60000);
-
-      await page.evaluateOnNewDocument(() => {
-        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-        Object.defineProperty(navigator, 'plugins', {
-          get: () => [
-            { name: 'Chrome PDF Plugin' },
-            { name: 'Chrome PDF Viewer' },
-            { name: 'Native Client' }
-          ]
-        });
-      });
-
-      let attempt = 1;
       while (attempt <= this.maxAttempts) {
         try {
           console.log(`Attempt ${attempt}/${this.maxAttempts} to load: ${url}`);
-
-          await page.goto(url, { 
-            waitUntil: 'domcontentloaded',
-            timeout: 60000
+          
+          const response = await page.goto(url, { 
+            waitUntil: 'domcontentloaded', 
+            timeout: 30000 
           });
 
-          if (waitForSelector) {
-            await page.waitForSelector(waitForSelector, { timeout: 30000 })
-              .catch(() => console.log(`Selector ${waitForSelector} not found`));
+          if (!response) {
+            throw new CrawlerError(
+              'Failed to get page response',
+              'NO_RESPONSE'
+            );
           }
 
-          const content = await page.evaluate(() => ({
-            text: document.body.innerText,
-            html: document.documentElement.outerHTML,
-            title: document.title,
-            url: window.location.href,
-            contentLength: document.body.innerText.length
-          }));
-
-          if (content.contentLength > 500) {
-            console.log('Page loaded successfully');
-            const source = url.includes('stubhub') ? 'stubhub' : 'vividseats';
-            const isSearchPage = url.includes('search');
-            
-            const parser = new TicketParser(content.html, source);
-            const parsedContent = isSearchPage 
-              ? parser.parseSearchResults()
-              : parser.parseEventTickets();
-
-            return {
-              ...content,
-              parsedContent
-            };
+          if (!response.ok()) {
+            throw new CrawlerError(
+              `HTTP ${response.status()} ${response.statusText()}`,
+              'HTTP_ERROR'
+            );
+          }
+          
+          const isEventPage = !url.includes('search');
+          if (isEventPage) {
+            try {
+              await page.waitForTimeout(5000);
+              await page.waitForFunction(
+                () => {
+                  const content = document.body.innerText;
+                  return content.length > 1000 && 
+                         (content.includes('Section') || content.includes('Row') || 
+                          content.includes('Quantity') || content.includes('Price'));
+                },
+                { timeout: 5000, polling: 100 }
+              );
+              console.log('Event page content loaded');
+            } catch (error) {
+              console.log('Warning: Ticket content not found');
+            }
           }
 
-          console.log('Invalid content, retrying...');
-          await page.waitForTimeout(this.retryDelays[attempt - 1]);
-          attempt++;
+          await page.waitForFunction(
+            () => document.body && document.body.innerText.length > 500,
+            { timeout: 5000, polling: 100 }
+          );
+
+          const html = await page.content();
+          const parsedData = await parserService.parseContent(html, url);
+          console.log('Parsed data:', parsedData);
+
+          return parsedData;
 
         } catch (error) {
-          console.error(`Attempt ${attempt} failed:`, error);
-          if (attempt === this.maxAttempts) throw error;
-          attempt++;
+          console.error(`Error in attempt ${attempt}:`, error);
+          if (attempt === this.maxAttempts) {
+            throw new CrawlerError(
+              'Failed to load page after all attempts',
+              'MAX_ATTEMPTS_REACHED',
+              error
+            );
+          }
           await page.waitForTimeout(this.retryDelays[attempt - 1]);
+          attempt++;
         }
       }
 
-      throw new Error('Failed to load page after all attempts');
-    } catch (error) {
-      console.error('Error loading page:', error);
-      throw error;
+      throw new CrawlerError(
+        'Failed to load page after all attempts',
+        'MAX_ATTEMPTS_REACHED'
+      );
+
     } finally {
-      if (page) await page.close();
       if (context) await context.close();
     }
   }
@@ -169,8 +196,10 @@ class CrawlerService extends BaseService {
     if (this.browser) {
       await this.browser.close();
       this.browser = null;
+      console.log('Browser closed');
     }
   }
 }
 
-export const crawlerService = CrawlerService.getInstance();
+export const crawlerService = new CrawlerService();
+export { CrawlerError };
