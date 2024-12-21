@@ -62,14 +62,21 @@ RUN mkdir -p /app/.cache/puppeteer \
     && chmod -R 777 /app/.cache/puppeteer
 
 # Copy package files
-COPY package.json package-lock.json* ./
+COPY package*.json ./
 
 # Install dependencies
 RUN npm config set fetch-timeout 300000 \
     && npm install --legacy-peer-deps
 
-# Copy application files
-COPY . .
+# Copy config files first
+COPY next.config.js .
+COPY tsconfig.json .
+COPY jsconfig.json .
+
+# Copy source directories
+COPY src ./src
+COPY lib ./lib
+COPY pages ./pages
 
 # Build the application
 RUN npm run build

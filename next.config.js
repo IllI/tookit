@@ -10,6 +10,15 @@ const nextConfig = {
     ignoreDuringBuilds: true,
   },
   webpack: (config, { isServer }) => {
+    // Add .ts and .tsx to resolved extensions
+    config.resolve.extensions = [
+      '.js',
+      '.jsx',
+      '.ts',
+      '.tsx',
+      ...config.resolve.extensions
+    ];
+
     if (!isServer) {
       config.resolve.fallback = {
         ...config.resolve.fallback,
@@ -24,6 +33,14 @@ const nextConfig = {
     config.module = {
       ...config.module,
       exprContextCritical: false,
+    };
+
+    // Add path aliases
+    config.resolve.alias = {
+      ...config.resolve.alias,
+      '@': '.',
+      '@/src': './src',
+      '@/lib': './lib'
     };
 
     return config;
