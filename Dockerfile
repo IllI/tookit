@@ -13,16 +13,19 @@ COPY package*.json ./
 # Install dependencies including dev dependencies
 RUN npm install
 
+# Create required directories
+RUN mkdir -p public styles components pages
+
 # Copy all source code and config files
 COPY tsconfig.json .
 COPY jsconfig.json .
 COPY next.config.js .
 COPY src ./src
 COPY lib ./lib
-COPY pages ./pages
-COPY styles ./styles
-COPY components ./components
-COPY public ./public || true
+COPY pages/* ./pages/ || true
+COPY styles/* ./styles/ || true
+COPY components/* ./components/ || true
+COPY public/* ./public/ || true
 
 # Create .env file with build-time variables
 RUN echo "NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}" > .env
@@ -31,10 +34,9 @@ RUN echo "SUPABASE_SERVICE_KEY=${SUPABASE_SERVICE_KEY}" >> .env
 RUN echo "FIRECRAWL_API_KEY=${FIRECRAWL_API_KEY}" >> .env
 RUN echo "OPENAI_API_KEY=${OPENAI_API_KEY}" >> .env
 
-# Create minimal pages for Next.js
-RUN mkdir -p pages
-RUN echo "export default function App({ Component, pageProps }) { return <Component {...pageProps} /> }" > pages/_app.tsx
-RUN echo "export default function Home() { return null }" > pages/index.tsx
+# Create minimal pages for Next.js if they don't exist
+RUN test -f pages/_app.tsx || echo "export default function App({ Component, pageProps }) { return <Component {...pageProps} /> }" > pages/_app.tsx
+RUN test -f pages/index.tsx || echo "export default function Home() { return null }" > pages/index.tsx
 
 # Build the application
 RUN npm run build
