@@ -13,16 +13,6 @@ COPY package*.json ./
 # Install dependencies including dev dependencies
 RUN npm install
 
-# Copy all files
-COPY . .
-
-# Create .env file with build-time variables
-RUN echo "NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}" > .env
-RUN echo "NEXT_PUBLIC_SUPABASE_ANON_KEY=${NEXT_PUBLIC_SUPABASE_ANON_KEY}" >> .env
-RUN echo "SUPABASE_SERVICE_KEY=${SUPABASE_SERVICE_KEY}" >> .env
-RUN echo "FIRECRAWL_API_KEY=${FIRECRAWL_API_KEY}" >> .env
-RUN echo "OPENAI_API_KEY=${OPENAI_API_KEY}" >> .env
-
 # Copy necessary config files
 COPY tsconfig.json .
 COPY jsconfig.json .
@@ -32,9 +22,13 @@ COPY next.config.js .
 COPY src ./src
 COPY lib ./lib
 COPY pages ./pages
-# Copy public directory if it exists, create if it doesn't
-RUN mkdir -p public
-COPY public ./public || true
+
+# Create .env file with build-time variables
+RUN echo "NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}" > .env
+RUN echo "NEXT_PUBLIC_SUPABASE_ANON_KEY=${NEXT_PUBLIC_SUPABASE_ANON_KEY}" >> .env
+RUN echo "SUPABASE_SERVICE_KEY=${SUPABASE_SERVICE_KEY}" >> .env
+RUN echo "FIRECRAWL_API_KEY=${FIRECRAWL_API_KEY}" >> .env
+RUN echo "OPENAI_API_KEY=${OPENAI_API_KEY}" >> .env
 
 # Build the application
 RUN npm run build
@@ -46,9 +40,6 @@ WORKDIR /app
 
 # Copy necessary files from builder
 COPY --from=builder /app/next.config.js ./
-# Copy public directory from builder
-RUN mkdir -p public
-COPY --from=builder /app/public ./public || true
 COPY --from=builder /app/.next ./.next
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/package.json ./package.json
