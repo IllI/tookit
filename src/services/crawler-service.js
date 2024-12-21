@@ -1,8 +1,6 @@
-import puppeteer from 'puppeteer-extra';
+import puppeteer from 'puppeteer-core';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import { parserService } from './parser-service';
-
-puppeteer.use(StealthPlugin());
 
 class CrawlerService {
   constructor() {
@@ -36,7 +34,11 @@ class CrawlerService {
           '--window-size=1920,1080',
           '--disable-blink-features=AutomationControlled'
         ],
-        ignoreDefaultArgs: ['--enable-automation']
+        ignoreDefaultArgs: ['--enable-automation'],
+        executablePath: process.env.CHROME_PATH || 
+                       (process.platform === 'win32' ? 
+                       'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' :
+                       '/usr/bin/google-chrome')
       };
 
       this.browser = await puppeteer.launch(launchOptions);
