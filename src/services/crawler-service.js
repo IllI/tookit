@@ -1,5 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
-import { firecrawlService } from '@/src/services/firecrawl-service';
+import { firecrawlService } from '../services/firecrawl-service';
 import { getParser } from './llm-service';
 const cheerio = require('cheerio');
 

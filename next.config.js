@@ -26,6 +26,14 @@ const nextConfig = {
       exprContextCritical: false,
     };
 
+    // Add path aliases
+    config.resolve.alias = {
+      ...config.resolve.alias,
+      '@': '.',
+      '@/src': './src',
+      '@/lib': './lib'
+    };
+
     return config;
   },
   experimental: {
