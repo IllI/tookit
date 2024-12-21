@@ -32,7 +32,9 @@ COPY next.config.js .
 COPY src ./src
 COPY lib ./lib
 COPY pages ./pages
-COPY public ./public
+# Copy public directory if it exists, create if it doesn't
+RUN mkdir -p public
+COPY public ./public || true
 
 # Build the application
 RUN npm run build
@@ -44,7 +46,9 @@ WORKDIR /app
 
 # Copy necessary files from builder
 COPY --from=builder /app/next.config.js ./
-COPY --from=builder /app/public ./public
+# Copy public directory from builder
+RUN mkdir -p public
+COPY --from=builder /app/public ./public || true
 COPY --from=builder /app/.next ./.next
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/package.json ./package.json
