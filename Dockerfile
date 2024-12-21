@@ -22,10 +22,12 @@ COPY jsconfig.json .
 COPY next.config.js .
 COPY src ./src
 COPY lib ./lib
-COPY pages/* ./pages/ || true
-COPY styles/* ./styles/ || true
-COPY components/* ./components/ || true
-COPY public/* ./public/ || true
+
+# Copy directories (if they exist)
+COPY pages ./pages
+COPY styles ./styles
+COPY components ./components
+COPY public ./public
 
 # Create .env file with build-time variables
 RUN echo "NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}" > .env
