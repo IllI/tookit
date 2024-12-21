@@ -2,7 +2,7 @@ import { EventEmitter } from 'events';
 import StubHubSearcher from '@/src/stub-hub';
 import VividSeatsSearcher from '@/src/vivid-seats';
 import type { SearchParams } from '@/lib/types/api';
-import { crawlerService } from '@/src/services/crawler-service.ts';
+import { crawlerService } from '../../src/services/crawler-service';
 import { createClient } from '@supabase/supabase-js';
 import { config } from '@/src/config/env';
 

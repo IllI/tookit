@@ -23,6 +23,17 @@ RUN echo "SUPABASE_SERVICE_KEY=${SUPABASE_SERVICE_KEY}" >> .env
 RUN echo "FIRECRAWL_API_KEY=${FIRECRAWL_API_KEY}" >> .env
 RUN echo "OPENAI_API_KEY=${OPENAI_API_KEY}" >> .env
 
+# Copy necessary config files
+COPY tsconfig.json .
+COPY jsconfig.json .
+COPY next.config.js .
+
+# Copy source files
+COPY src ./src
+COPY lib ./lib
+COPY pages ./pages
+COPY public ./public
+
 # Build the application
 RUN npm run build
 

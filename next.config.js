@@ -19,6 +19,14 @@ const nextConfig = {
       ...config.resolve.extensions
     ];
 
+    // Ensure path aliases are properly resolved
+    config.resolve.modules = [
+      ...config.resolve.modules,
+      '.',
+      'src',
+      'lib'
+    ];
+
     if (!isServer) {
       config.resolve.fallback = {
         ...config.resolve.fallback,
