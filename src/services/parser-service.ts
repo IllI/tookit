@@ -4,33 +4,34 @@ import { cacheService } from './cache-service';
 
 const SEARCH_PAGE_PROMPTS = {
   stubhub: `
-Find event information in the StubHub search results HTML.
+Find event information from the StubHub search results HTML.
 Look for elements with data-testid="primaryGrid" to find event listings.
 
-Extract these exact fields:
-1. name: The artist/performer name only
-2. venue: The exact venue name shown in the listing
+Required fields to extract:
+1. name: The exact artist/performer name from the listing
+2. venue: The physical venue name where the event takes place (NOT "StubHub", "See Tickets", or any ticket seller name)
 3. date: Event date in ISO format
-4. location: City and state
+4. location: City and state where the venue is located
 
-Return this JSON structure:
+Return this JSON structure with ONLY values found in the HTML:
 {
   "events": [{
-    "name": "artist/performer name",
-    "venue": "venue name from listing",
-    "date": "ISO date",
+    "name": "",
+    "venue": "",
+    "date": "",
     "location": {
-      "city": "city name",
-      "state": "state code"
+      "city": "",
+      "state": ""
     },
     "source": "stubhub"
   }]
 }
 
 Important:
-- Look for event information inside data-testid="primaryGrid" elements
-- Extract venue names exactly as shown
-- Do not modify or assume any values
+- Extract the EXACT venue name where the event is taking place
+- Do not use "StubHub", "See Tickets", or any ticket seller as the venue
+- Look for venue information near the event details
+- Only use values found in the HTML
 `,
 
   vividseats: `
