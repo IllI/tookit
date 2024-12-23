@@ -1,9 +1,12 @@
 import { EventEmitter } from 'events';
-import puppeteer from 'puppeteer';
+import puppeteerCore from 'puppeteer-core';
 import { addExtra } from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import UserAgent from 'user-agents';
 import { TicketParser } from '@/src/services/ticket-parser';
+
+const puppeteer = addExtra(puppeteerCore);
+puppeteer.use(StealthPlugin());
 
 type SearchParams = {
   keyword: string;
@@ -12,27 +15,38 @@ type SearchParams = {
 };
 
 export class BrowserService extends EventEmitter {
-  private browser: puppeteer.Browser | null = null;
-  private static instance: BrowserService;
+  private browser: any;
+  private maxAttempts = 3;
+  private retryDelays = [2000, 3000, 4000];
 
-  private constructor() {
+  constructor() {
     super();
+    this.browser = null;
   }
 
-  public static getInstance(): BrowserService {
-    if (!BrowserService.instance) {
-      BrowserService.instance = new BrowserService();
-    }
-    return BrowserService.instance;
-  }
-
-  private async getBrowser(): Promise<puppeteer.Browser> {
+  async initialize() {
     if (!this.browser) {
-      const puppeteerExtra = addExtra(puppeteer);
-      puppeteerExtra.use(StealthPlugin());
+      // Default Chromium paths by platform
+      const defaultPaths = {
+        win32: [
+          'C:\\Program Files\\Chromium\\Application\\chrome.exe',
+          'C:\\Program Files (x86)\\Chromium\\Application\\chrome.exe',
+          `${process.env.LOCALAPPDATA}\\Chromium\\Application\\chrome.exe`
+        ],
+        darwin: [
+          '/Applications/Chromium.app/Contents/MacOS/Chromium',
+          '/usr/local/bin/chromium'
+        ],
+        linux: [
+          '/usr/bin/chromium',
+          '/usr/bin/chromium-browser',
+          '/snap/bin/chromium'
+        ]
+      };
 
-      this.browser = await puppeteerExtra.launch({
-        headless: true,
+      const launchOptions = {
+        headless: 'new',
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',
@@ -43,7 +57,40 @@ export class BrowserService extends EventEmitter {
           '--disable-blink-features=AutomationControlled'
         ],
         ignoreDefaultArgs: ['--enable-automation']
-      });
+      };
+
+      try {
+        // Try environment variable path first
+        if (launchOptions.executablePath) {
+          this.browser = await puppeteer.launch(launchOptions);
+          console.log('Browser initialized with env path:', launchOptions.executablePath);
+        } else {
+          // Try platform-specific paths
+          const paths = defaultPaths[process.platform as keyof typeof defaultPaths] || [];
+          let launched = false;
+          
+          for (const path of paths) {
+            try {
+              this.browser = await puppeteer.launch({
+                ...launchOptions,
+                executablePath: path
+              });
+              console.log('Browser initialized with path:', path);
+              launched = true;
+              break;
+            } catch (e) {
+              console.log('Failed to launch with path:', path);
+            }
+          }
+          
+          if (!launched) {
+            throw new Error('Could not find Chromium installation');
+          }
+        }
+      } catch (error) {
+        console.error('Browser initialization failed:', error);
+        throw new Error('Could not initialize browser. Please install Chromium or set PUPPETEER_EXECUTABLE_PATH');
+      }
     }
     return this.browser;
   }
@@ -142,7 +189,7 @@ export class BrowserService extends EventEmitter {
     let context = null;
 
     try {
-      const browser = await this.getBrowser();
+      const browser = await this.initialize();
       context = await browser.createIncognitoBrowserContext();
       page = await context.newPage();
 
@@ -216,4 +263,4 @@ export class BrowserService extends EventEmitter {
   }
 }
 
-export const browserService = BrowserService.getInstance();
+export const browserService = new BrowserService();

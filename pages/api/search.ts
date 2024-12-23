@@ -1,5 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { browserService } from '@/src/lib/browser';
+import { SearchService } from '@/lib/services/search-service';
+import type { SearchParams } from '@/lib/types/api';
 
 export default async function handler(
   req: NextApiRequest,
@@ -9,6 +10,7 @@ export default async function handler(
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
+  // Set SSE headers
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
@@ -16,8 +18,13 @@ export default async function handler(
     'X-Accel-Buffering': 'no'
   });
 
+  const searchService = new SearchService();
+  const params = req.body as SearchParams;
+
+  // Helper function to send SSE messages
   const sendEvent = (data: any) => {
     res.write(`data: ${JSON.stringify(data)}\n\n`);
+    // Force flush if available
     if (typeof (res as any).flush === 'function') {
       (res as any).flush();
     }
@@ -25,24 +32,24 @@ export default async function handler(
 
   try {
     // Set up event listeners
-    browserService.on('status', (message: string) => {
+    searchService.on('status', (message: string) => {
       console.log('Status update:', message);
       sendEvent({ type: 'status', message });
     });
 
-    browserService.on('tickets', (tickets: any[]) => {
+    searchService.on('tickets', (tickets: any[]) => {
       console.log('Found tickets:', tickets.length);
       sendEvent({ type: 'tickets', tickets });
     });
 
-    browserService.on('error', (error: string) => {
+    searchService.on('error', (error: string) => {
       console.error('Search error:', error);
       sendEvent({ type: 'error', error });
     });
 
     // Start the search
-    console.log('Starting search with params:', req.body);
-    const result = await browserService.search(req.body);
+    console.log('Starting search with params:', params);
+    const result = await searchService.searchAll(params);
 
     // Send completion event
     sendEvent({

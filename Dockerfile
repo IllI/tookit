@@ -60,3 +60,76 @@ ENV PUPPETEER_EXECUTABLE_PATH="/usr/bin/google-chrome-stable"
 CMD /usr/bin/Xvfb :99 -screen 0 1024x768x24 > /dev/null 2>&1 & \
     service dbus start & \
     yarn start
+
+# Use Node.js LTS (Long Term Support) version
+FROM node:18-alpine AS builder
+
+# Set working directory
+WORKDIR /app
+
+# Install necessary build tools and Chrome
+RUN apk update && \
+    apk add --no-cache \
+    chromium \
+    nss \
+    freetype \
+    freetype-dev \
+    harfbuzz \
+    ca-certificates \
+    ttf-freefont \
+    python3 \
+    make \
+    g++ \
+    git
+
+# Set Chrome executable path for Puppeteer
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
+    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser
+
+# Copy package files
+COPY package*.json ./
+
+# Install dependencies
+RUN npm install
+
+# Copy source code
+COPY . .
+
+# Build the application
+RUN npm run build
+
+# Production image
+FROM node:18-alpine AS runner
+
+WORKDIR /app
+
+# Install Chrome in production image
+RUN apk add --no-cache \
+    chromium \
+    nss \
+    freetype \
+    harfbuzz \
+    ca-certificates \
+    ttf-freefont
+
+# Set Chrome path in production
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
+    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser
+
+# Copy necessary files from builder
+COPY --from=builder /app/next.config.js ./
+COPY --from=builder /app/package.json ./
+COPY --from=builder /app/.next ./.next
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/.env ./
+COPY --from=builder /app/public ./public
+
+# Set environment variables
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+
+# Expose the port the app runs on
+EXPOSE 3000
+
+# Start the application
+CMD ["npm", "start"]

@@ -12,7 +12,17 @@ const nextConfig = {
     // your project has type errors.
     ignoreBuildErrors: true,
   },
+  telemetry: false,
   webpack: (config, { isServer }) => {
+    // Add .ts and .tsx to resolved extensions
+    config.resolve.extensions = [
+      '.js',
+      '.jsx',
+      '.ts',
+      '.tsx',
+      ...config.resolve.extensions
+    ];
+
     if (!isServer) {
       config.resolve.fallback = {
         ...config.resolve.fallback,
@@ -33,7 +43,9 @@ const nextConfig = {
   },
   experimental: {
     serverComponentsExternalPackages: ['puppeteer', 'x-crawl'],
-    esmExternals: 'loose'
+    esmExternals: 'loose',
+    disableOptimizedLoading: true,
+    outputFileTracingRoot: undefined
   }
 }
 

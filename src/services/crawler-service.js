@@ -1,12 +1,23 @@
-import puppeteer from 'puppeteer-core';
+import { createClient } from '@supabase/supabase-js';
+import puppeteerCore from 'puppeteer-core';
+import { addExtra } from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
-import { parserService } from './parser-service';
+
+const puppeteer = addExtra(puppeteerCore);
+puppeteer.use(StealthPlugin());
 
 class CrawlerService {
   constructor() {
     this.browser = null;
     this.maxAttempts = 3;
     this.retryDelays = [2000, 3000, 4000];
+    this.processedEvents = new Set();
+    
+    // Initialize Supabase client
+    this.supabase = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL,
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+    );
     this.searchService = null;
   }
 
@@ -25,6 +36,7 @@ class CrawlerService {
     if (!this.browser) {
       const launchOptions = {
         headless: 'new',
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome-stable',
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',
@@ -34,11 +46,7 @@ class CrawlerService {
           '--window-size=1920,1080',
           '--disable-blink-features=AutomationControlled'
         ],
-        ignoreDefaultArgs: ['--enable-automation'],
-        executablePath: process.env.CHROME_PATH || 
-                       (process.platform === 'win32' ? 
-                       'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' :
-                       '/usr/bin/google-chrome')
+        ignoreDefaultArgs: ['--enable-automation']
       };
 
       this.browser = await puppeteer.launch(launchOptions);
@@ -47,10 +55,16 @@ class CrawlerService {
     return { browser: this.browser };
   }
 
-  async crawlPage(url) {
+  async crawlPage(options) {
+    const url = typeof options === 'string' ? options : options?.url;
+    
     if (!url || typeof url !== 'string') {
       throw new Error('Invalid URL provided to crawlPage');
     }
+
+    // Ensure URL is properly encoded
+    const encodedUrl = encodeURI(decodeURI(url));
+    console.log('Encoded URL:', encodedUrl);
 
     const { browser } = await this.initialize();
     let context = null;
@@ -83,9 +97,12 @@ class CrawlerService {
 
       while (attempt <= this.maxAttempts) {
         try {
-          console.log(`Attempt ${attempt}/${this.maxAttempts} to load: ${url}`);
+          console.log(`Attempt ${attempt}/${this.maxAttempts} to load: ${encodedUrl}`);
           
-          await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+          await page.goto(encodedUrl, { 
+            waitUntil: 'domcontentloaded', 
+            timeout: 30000 
+          });
           
           const isEventPage = !url.includes('search');
           if (isEventPage) {
@@ -111,14 +128,22 @@ class CrawlerService {
             { timeout: 5000, polling: 100 }
           );
 
-          // Get page content
-          const html = await page.content();
+          const content = await page.evaluate(() => ({
+            text: document.body.innerText,
+            html: document.documentElement.outerHTML,
+            title: document.title,
+            url: window.location.href,
+            contentLength: document.body.innerText.length
+          }));
 
-          // Use HuggingFace parser to extract information
-          const parsedData = await parserService.parseContent(html, url);
-          console.log('Parsed data:', parsedData);
+          if (content.contentLength > 500) {
+            console.log('Page loaded successfully');
+            return content;
+          }
 
-          return parsedData;
+          console.log('Invalid content, retrying...');
+          await page.waitForTimeout(this.retryDelays[attempt - 1]);
+          attempt++;
 
         } catch (error) {
           console.error(`Error in attempt ${attempt}:`, error);

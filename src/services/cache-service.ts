@@ -14,7 +14,6 @@ class CacheService {
   }
 
   private getCacheKey(url: string, html: string): string {
-    // Create a cache key based on URL and content hash
     const contentHash = Buffer.from(html).toString('base64').slice(0, 20);
     return `${url}:${contentHash}`;
   }
@@ -43,7 +42,6 @@ class CacheService {
       timestamp: Date.now()
     });
 
-    // Clean up old entries
     this.cleanup();
   }
 
