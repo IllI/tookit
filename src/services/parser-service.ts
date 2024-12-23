@@ -1,6 +1,7 @@
 import { HfInference } from '@huggingface/inference';
 import type { Event, ScrapedContent } from '@/lib/types/schemas';
 import { cacheService } from './cache-service';
+import * as cheerio from 'cheerio';
 
 const SEARCH_PAGE_PROMPTS = {
   stubhub: `
@@ -74,60 +75,61 @@ export class ParserService {
     this.hf = new HfInference(process.env.HF_TOKEN);
   }
 
-  private formatPrompt(html: string, url: string): string {
+  private formatPrompt(html: string, url: string, searchParams: { keyword: string; location?: string }): string {
     const source = url.includes('vividseats') ? 'vividseats' : 'stubhub';
     
-    // Clean HTML and extract main content
-    const cleanHtml = html
+    // Load HTML into Cheerio
+    const $ = cheerio.load(html);
+    
+    // Extract content based on source
+    const selector = source === 'vividseats' ? 
+      '[data-testid="productions-list"]' : 
+      '[data-testid="primaryGrid"]';
+    
+    // Get the HTML of just the event listings section
+    const eventSection = $(selector).html() || '';
+    
+    // Clean the extracted HTML
+    const cleanContent = eventSection
       .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
       .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, '')
-      .replace(/<head>.*?<\/head>/s, '')
-      .replace(/<footer.*?<\/footer>/s, '')  // Remove footer
-      .replace(/<meta[^>]*>/gi, '')
-      .replace(/<link[^>]*>/gi, '')
       .replace(/<!--[\s\S]*?-->/g, '')
       .trim();
 
-    // Extract text content, focusing on main content area
-    const mainContent = cleanHtml
-      .replace(/<[^>]+>/g, '\n')  // Replace tags with newlines
-      .split('\n')
-      .map(line => line.trim())
-      .filter(line => line.length > 0)  // Remove empty lines
-      .join('\n')
-      .substring(0, 4000);  // Limit size
-
     return `[SYSTEM]
-You are a JSON generator that extracts event information from text. You only output valid JSON objects.
+You are a JSON generator that extracts event information from HTML. You only output valid JSON objects.
 
 [USER]
-Extract event details from this ${source} search results text.
+Find events matching these search parameters:
+- Artist/Event: ${searchParams.keyword}
+- Location: ${searchParams.location || 'any'}
+
+Extract matching event details from this ${source} search results HTML.
 Return ONLY a JSON object with these fields:
-- name: The event/artist name
-- venue: The venue name
+- name: The exact event/artist name
+- venue: The physical venue name (not ticket seller names)
 - date: The event date
 - location: City and state
 
 Required JSON format:
 {
   "events": [{
-    "name": "event name here",
-    "venue": "venue name here",
-    "date": "date here",
+    "name": "",
+    "venue": "",
+    "date": "",
     "location": {
-      "city": "city here",
-      "state": "state code"
+      "city": "",
+      "state": ""
     },
     "source": "${source}"
   }]
 }
 
-Text content:
-${mainContent}
+HTML Content:
+${cleanContent}
 
 [ASSISTANT]
 {`;
-
   }
 
   private extractSection(html: string, selector: string): string {
@@ -136,14 +138,14 @@ ${mainContent}
     return sectionMatch ? sectionMatch[1] : '';
   }
 
-  async parseContent(html: string, url: string): Promise<Event> {
+  async parseContent(html: string, url: string, searchParams: { keyword: string; location?: string }): Promise<Event> {
     try {
       const cached = await cacheService.get(url, html);
       if (cached) return this.transformToEvent(cached, url);
 
       const response = await this.hf.textGeneration({
         model: 'mistralai/Mixtral-8x7B-Instruct-v0.1',
-        inputs: this.formatPrompt(html, url),
+        inputs: this.formatPrompt(html, url, searchParams),
         parameters: {
           max_new_tokens: 1000,
           temperature: 0.1,
