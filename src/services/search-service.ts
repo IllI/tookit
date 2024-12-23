@@ -22,28 +22,102 @@ class SearchService extends BaseService {
 
   async searchAll(params: SearchParams): Promise<SearchResult> {
     try {
-      const promises = [];
-      const metadata: SearchResult['metadata'] = {};
+      // First, check for existing events
+      this.emit('status', 'Checking for existing events...');
+      const { data: existingEvents, error: queryError } = await this.supabase
+        .from('events')
+        .select(`
+          id,
+          name,
+          date,
+          venue,
+          event_links (
+            source,
+            url
+          )
+        `)
+        .ilike('name', `%${params.keyword}%`)
+        .gte('date', new Date().toISOString());
 
-      if (!params.source || params.source === 'all' || params.source === 'stubhub') {
-        promises.push(this.searchStubHub(params));
-        metadata.stubhub = { isLive: true };
+      if (queryError) {
+        console.error('Database query error:', queryError);
+        throw queryError;
       }
 
-      if (!params.source || params.source === 'all' || params.source === 'vividseats') {
-        promises.push(this.searchVividSeats(params));
-        metadata.vividseats = { isLive: true };
+      // Run new searches to get fresh data
+      this.emit('status', 'Starting search...');
+      const results = await scraperService.search(params);
+      
+      // Process each found event
+      if (results.data?.length) {
+        for (const event of results.data) {
+          // Try to find matching event in existing events
+          const existingEvent = existingEvents?.find(e => 
+            e.name.toLowerCase() === event.name.toLowerCase() &&
+            e.venue.toLowerCase() === event.venue.toLowerCase() &&
+            new Date(e.date).toDateString() === new Date(event.date).toDateString()
+          );
+
+          if (existingEvent) {
+            // Check if this source's link exists
+            const hasSourceLink = existingEvent.event_links?.some(
+              link => link.source === event.source
+            );
+
+            if (!hasSourceLink) {
+              // Add new source link if it doesn't exist
+              const { error: linkError } = await this.supabase
+                .from('event_links')
+                .insert({
+                  event_id: existingEvent.id,
+                  source: event.source,
+                  url: event.url
+                });
+
+              if (linkError) {
+                console.error('Error adding event link:', linkError);
+              }
+            }
+          } else {
+            // Create new event
+            const { data: newEvent, error: insertError } = await this.supabase
+              .from('events')
+              .insert({
+                name: event.name,
+                date: event.date,
+                venue: event.venue,
+                city: event.location.city,
+                state: event.location.state,
+                country: event.location.country,
+                created_at: new Date().toISOString()
+              })
+              .select()
+              .single();
+
+            if (insertError) {
+              console.error('Error creating event:', insertError);
+              continue;
+            }
+
+            if (newEvent) {
+              // Add event link
+              const { error: linkError } = await this.supabase
+                .from('event_links')
+                .insert({
+                  event_id: newEvent.id,
+                  source: event.source,
+                  url: event.url
+                });
+
+              if (linkError) {
+                console.error('Error adding event link:', linkError);
+              }
+            }
+          }
+        }
       }
 
-      const results = await Promise.all(promises);
-      const allEvents = results.flat();
-
-      return {
-        success: true,
-        data: allEvents,
-        metadata
-      };
-
+      // Return updated data...
     } catch (error) {
       console.error('Search error:', error);
       return {

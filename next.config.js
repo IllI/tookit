@@ -12,41 +12,18 @@ const nextConfig = {
     // your project has type errors.
     ignoreBuildErrors: true,
   },
-  telemetry: false,
-  webpack: (config, { isServer }) => {
-    // Add .ts and .tsx to resolved extensions
-    config.resolve.extensions = [
-      '.js',
-      '.jsx',
-      '.ts',
-      '.tsx',
-      ...config.resolve.extensions
-    ];
-
-    if (!isServer) {
-      config.resolve.fallback = {
-        ...config.resolve.fallback,
-        fs: false,
-        net: false,
-        tls: false,
-        child_process: false,
-        canvas: false,
-      };
-    }
-
-    config.module = {
-      ...config.module,
-      exprContextCritical: false,
+  experimental: {
+    serverComponentsExternalPackages: ['@huggingface/inference']
+  },
+  webpack: (config) => {
+    config.resolve.fallback = {
+      ...config.resolve.fallback,
+      fs: false,
+      net: false,
+      tls: false,
     };
-
     return config;
   },
-  experimental: {
-    serverComponentsExternalPackages: ['puppeteer', 'x-crawl'],
-    esmExternals: 'loose',
-    disableOptimizedLoading: true,
-    outputFileTracingRoot: undefined
-  }
 }
 
 module.exports = nextConfig 

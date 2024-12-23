@@ -78,58 +78,27 @@ export class ParserService {
   private formatPrompt(html: string, url: string, searchParams: { keyword: string; location?: string }): string {
     const source = url.includes('vividseats') ? 'vividseats' : 'stubhub';
     
-    // Load HTML into Cheerio
-    const $ = cheerio.load(html);
-    
-    // Extract content based on source
-    const selector = source === 'vividseats' ? 
-      '[data-testid="productions-list"]' : 
-      '[data-testid="primaryGrid"]';
-    
-    // Get the HTML of just the event listings section
-    const eventSection = $(selector).html() || '';
-    
-    // Clean the extracted HTML
-    const cleanContent = eventSection
-      .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
-      .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, '')
-      .replace(/<!--[\s\S]*?-->/g, '')
-      .trim();
-
-    return `[SYSTEM]
-You are a JSON generator that extracts event information from HTML. You only output valid JSON objects.
-
-[USER]
-Find events matching these search parameters:
-- Artist/Event: ${searchParams.keyword}
-- Location: ${searchParams.location || 'any'}
-
-Extract matching event details from this ${source} search results HTML.
-Return ONLY a JSON object with these fields:
-- name: The exact event/artist name
-- venue: The physical venue name (not ticket seller names)
-- date: The event date
-- location: City and state
-
-Required JSON format:
+    return `Find the event data in the following html for "${searchParams.keyword}" in "${searchParams.location || 'any'}".
+Return this JSON structure with ONLY values found in the HTML:
 {
-  "events": [{
-    "name": "",
-    "venue": "",
-    "date": "",
-    "location": {
-      "city": "",
-      "state": ""
-    },
-    "source": "${source}"
-  }]
+  "events": [
+    {
+      "name": "exact event name",
+      "venue": "exact venue name",
+      "date": "exact date",
+      "location": {
+        "city": "exact city",
+        "state": "exact state"
+      },
+      "source": "${source}"
+    }
+  ]
 }
 
-HTML Content:
-${cleanContent}
+Here is the HTML content:
+${html}
 
-[ASSISTANT]
-{`;
+Return ONLY the JSON object, formatted exactly as shown above.`;
   }
 
   private extractSection(html: string, selector: string): string {
@@ -138,82 +107,107 @@ ${cleanContent}
     return sectionMatch ? sectionMatch[1] : '';
   }
 
-  async parseContent(html: string, url: string, searchParams: { keyword: string; location?: string }): Promise<Event> {
+  async parseContent(
+    html: string, 
+    url: string, 
+    searchParams: { keyword: string; location?: string },
+    eventLinks: Array<{ url: string; html: string }> = []
+  ): Promise<{ events: Event[] }> {
     try {
       const cached = await cacheService.get(url, html);
-      if (cached) return this.transformToEvent(cached, url);
+      if (cached) return { events: [this.transformToEvent(cached, url)] };
 
+      const source = url.includes('vividseats') ? 'vividseats' : 'stubhub';
+      
+      console.log('[Parser] Sending request to model...');
+      
       const response = await this.hf.textGeneration({
         model: 'mistralai/Mixtral-8x7B-Instruct-v0.1',
-        inputs: this.formatPrompt(html, url, searchParams),
+        inputs: `Extract event information from this HTML content.
+The event we're looking for is "${searchParams.keyword}" in "${searchParams.location || 'any'}".
+
+Output a JSON object in this exact format:
+{
+  "events": [
+    {
+      "name": "event name",
+      "venue": "venue name",
+      "date": "event date",
+      "location": {
+        "city": "city name",
+        "state": "state code"
+      },
+      "source": "${source}",
+      "url": "event page url"
+    }
+  ]
+}
+
+HTML:
+${html}
+
+Important: Return only the JSON object, no other text.`,
         parameters: {
           max_new_tokens: 1000,
           temperature: 0.1,
           return_full_text: false,
-          stop: ["}"]
+          stop: ["}]}", "HTML:"]
         }
       });
 
-      // Start with opening brace and response
-      let jsonStr = '{' + response.generated_text;
+      console.log('[Parser] Model response:', response.generated_text);
 
-      // Clean up any malformed JSON structure
-      jsonStr = jsonStr
-        .replace(/\}\}+\]\}$/g, '}]}')  // Fix multiple closing braces
-        .replace(/\}\}+$/g, '}')        // Fix extra closing braces
-        .replace(/,\s*\}/g, '}')        // Remove trailing commas
-        .trim();
-
-      // If we're missing closing braces, add them
-      if (!jsonStr.endsWith(']}')) {
-        if (jsonStr.includes('"events": [')) {
-          if (!jsonStr.endsWith('}')) {
-            jsonStr += '}';  // Close the event object
-          }
-          jsonStr += ']}'   // Close the events array and root object
-        }
+      // Look for JSON object in response
+      const jsonMatch = response.generated_text.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        console.error('[Parser] No JSON found in response:', response.generated_text);
+        return { events: [] };
       }
 
-      console.log('Model JSON:', jsonStr);
+      let jsonStr = jsonMatch[0]
+        .replace(/\}\}+\]\}+$/, '}]}')  // Fix multiple closing braces
+        .replace(/,\s*[\}\]]/g, '$1')   // Remove trailing commas
+        .replace(/,\s*USA/, '')         // Remove USA from state
+        .trim();
+
+      console.log('[Parser] Cleaned JSON:', jsonStr);
 
       try {
         const parsedJson = JSON.parse(jsonStr);
-        const event = parsedJson.events?.[0];
-        if (!event) {
-          throw new Error('No event data found in response');
-        }
+        
+        // Use the URLs from the model's response
+        const events = await Promise.all(
+          (parsedJson.events || [])
+            .filter(event => event && event.name && event.venue)
+            .map(async (event: any) => {
+              const parsedContent: ScrapedContent = {
+                name: event.name?.trim() || '',
+                date: event.date?.trim() || new Date().toISOString(),
+                venue: event.venue?.trim() || '',
+                city: event.location?.city?.trim() || '',
+                state: event.location?.state?.trim() || '',
+                country: 'USA',
+                url: event.url || '',  // Use the URL from the model's response
+                price: {
+                  amount: 0,
+                  currency: 'USD'
+                }
+              };
 
-        // Format the location object if it's a string
-        if (typeof event.location === 'string') {
-          const [city, state] = event.location.split(',').map(s => s.trim());
-          event.location = {
-            city: city || 'Unknown',
-            state: (state || '').substring(0, 2) || 'XX'
-          };
-        }
+              if (this.validateContent(parsedContent)) {
+                await cacheService.set(url, html, parsedContent);
+                // Use the event URL from the model's response
+                return this.transformToEvent(parsedContent, event.url);
+              }
+              return null;
+            })
+        );
 
-        const parsedContent: ScrapedContent = {
-          name: event.name?.trim() || '',
-          date: event.date?.trim() || new Date().toISOString(),
-          venue: event.venue?.trim() || '',
-          city: event.location?.city?.trim() || '',
-          state: event.location?.state?.trim() || '',
-          country: 'USA',
-          price: {
-            amount: 0,
-            currency: 'USD'
-          }
-        };
-
-        if (this.validateContent(parsedContent)) {
-          await cacheService.set(url, html, parsedContent);
-        }
-
-        return this.transformToEvent(parsedContent, url);
+        return { events: events.filter((e): e is Event => e !== null) };
 
       } catch (parseError) {
-        console.error('JSON parse error:', parseError, 'for:', jsonStr);
-        throw parseError;
+        console.error('JSON parse error:', parseError);
+        return { events: [] };
       }
 
     } catch (error) {
