@@ -331,57 +331,63 @@ export class SearchService extends EventEmitter {
       // Get HTML from Jina Reader
       const html = await webReaderService.fetchPage(url);
       console.log(`Received HTML from ${source} (${html.length} bytes)`);
-      
-      // Extract links first
-      const $ = cheerio.load(html);
-      const selector = source === 'vividseats' 
-        ? '[data-testid="productions-list"] a'
-        : '[data-testid="primaryGrid"] a';
-      
-      const links = $(selector);
-      console.log(`Found ${links.length} ticket links in ${source}`);
-      
-      const eventLinks = links.map((_, el) => ({
-        href: $(el).attr('href') || ''
-      })).get();
 
       try {
-        // Let the model identify the event based on the search query
+        // Let HF parse the HTML and extract event data
         const response = await hf.textGeneration({
           model: 'mistralai/Mixtral-8x7B-Instruct-v0.1',
-          inputs: `The user searched for "${params.keyword}" in ${params.location || 'any location'}. 
-Looking at this HTML from ${source}, identify the specific event that matches their search:
+          inputs: `You are an expert at parsing HTML and extracting event information.
+Given this HTML from ${source} and search query "${params.keyword}" in ${params.location || 'any location'},
+extract the event details that match the search query.
 
 ${html}
 
-Return only the full event name as it appears on the page.`,
+Return a JSON object with these fields:
+{
+  "name": "full event name",
+  "venue": "venue name",
+  "date": "event date",
+  "city": "city name",
+  "state": "state code",
+  "country": "country code"
+}
+
+Only return the JSON object, no other text.`,
           parameters: {
-            max_new_tokens: 100,
+            max_new_tokens: 500,
             temperature: 0.1
           }
         });
 
-        console.log('HF identified event:', response.generated_text);
+        let eventData: any;
+        try {
+          eventData = JSON.parse(response.generated_text?.trim() || '{}');
+          console.log('Parsed event data:', eventData);
+        } catch (e) {
+          console.error('Failed to parse HF response:', e);
+          return [];
+        }
 
-        // Let HF identify the correct event
-        return eventLinks.map((link) => ({
-          name: response.generated_text,  // Trust the model's identification
-          venue: '',
-          date: new Date().toISOString(),
+        // Create event data object
+        return [{
+          name: eventData.name,
+          venue: eventData.venue,
+          date: eventData.date,
           location: {
-            city: params.location || '',
-            state: '',
-            country: 'USA'
+            city: eventData.city,
+            state: eventData.state,
+            country: eventData.country || 'USA'
           },
           source,
-          url: source === 'vividseats' 
-            ? `https://www.vividseats.com${link.href}`
-            : `https://www.stubhub.com${link.href}`,
+          url: source === 'vividseats'
+            ? `https://www.vividseats.com${eventData.url || ''}`
+            : `https://www.stubhub.com${eventData.url || ''}`,
           tickets: []
-        }));
+        }];
+
       } catch (error) {
-        console.error('HF API error, falling back to basic extraction:', error);
-        throw error; // Let the caller handle the error
+        console.error('HF API error:', error);
+        throw error;
       }
     } catch (error) {
       console.error(`Error searching ${source}:`, error);
