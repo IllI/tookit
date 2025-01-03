@@ -336,54 +336,80 @@ export class SearchService extends EventEmitter {
         // Let HF parse the HTML and extract event data
         const response = await hf.textGeneration({
           model: 'mistralai/Mixtral-8x7B-Instruct-v0.1',
-          inputs: `You are an expert at parsing HTML and extracting event information.
-Given this HTML from ${source} and search query "${params.keyword}" in ${params.location || 'any location'},
-extract the event details that match the search query.
+          inputs: `Extract all event details from this HTML that match the search query "${params.keyword}" in ${params.location || 'any location'}.
+Only include exact matches for the artist name "${params.keyword}" - do not include related events or parking.
 
+HTML:
 ${html}
 
-Return a JSON object with these fields:
-{
+Return only a JSON array of objects with these fields:
+[{
   "name": "full event name",
   "venue": "venue name",
-  "date": "event date",
+  "date": "event date in YYYY-MM-DD format",
   "city": "city name",
   "state": "state code",
-  "country": "country code"
-}
-
-Only return the JSON object, no other text.`,
+  "country": "country code",
+  "url": "relative url path"
+}]`,
           parameters: {
             max_new_tokens: 500,
-            temperature: 0.1
+            temperature: 0.1,
+            return_full_text: false
           }
         });
 
-        let eventData: any;
+        let eventsData: any[];
         try {
-          eventData = JSON.parse(response.generated_text?.trim() || '{}');
-          console.log('Parsed event data:', eventData);
+          const parsed = JSON.parse(response.generated_text?.trim() || '[]');
+          eventsData = Array.isArray(parsed) ? parsed : [parsed];
+          console.log('Parsed event data:', eventsData);
         } catch (e) {
           console.error('Failed to parse HF response:', e);
           return [];
         }
 
-        // Create event data object
-        return [{
-          name: eventData.name,
-          venue: eventData.venue,
-          date: eventData.date,
-          location: {
-            city: eventData.city,
-            state: eventData.state,
-            country: eventData.country || 'USA'
-          },
-          source,
-          url: source === 'vividseats'
-            ? `https://www.vividseats.com${eventData.url || ''}`
-            : `https://www.stubhub.com${eventData.url || ''}`,
-          tickets: []
-        }];
+        // Filter and convert events to EventData format
+        return eventsData
+          .filter(eventData => {
+            // Normalize event name and search keyword for comparison
+            const normalizedEventName = eventData.name.toLowerCase().trim();
+            const normalizedKeyword = params.keyword.toLowerCase().trim();
+            
+            // Only include exact matches for the artist name
+            // Exclude parking, VIP packages, and other related events
+            return normalizedEventName === normalizedKeyword || 
+                   normalizedEventName === normalizedKeyword + ' concert' ||
+                   normalizedEventName === normalizedKeyword + ' live';
+          })
+          .map(eventData => {
+            // Convert date string to ISO format
+            let eventDate = eventData.date;
+            if (!eventData.date.includes('-')) {
+              // Handle dates like "Jan 11" by adding current year
+              const currentYear = new Date().getFullYear();
+              const dateParts = eventData.date.split(' ');
+              const month = dateParts[0];
+              const day = parseInt(dateParts[1]);
+              eventDate = `${currentYear}-${new Date(`${month} 1 2024`).getMonth() + 1}-${day.toString().padStart(2, '0')}`;
+            }
+
+            return {
+              name: eventData.name,
+              venue: eventData.venue,
+              date: eventDate,
+              location: {
+                city: eventData.city,
+                state: eventData.state,
+                country: eventData.country || 'USA'
+              },
+              source,
+              url: source === 'vividseats'
+                ? `https://www.vividseats.com${eventData.url || ''}`
+                : `https://www.stubhub.com${eventData.url || ''}`,
+              tickets: []
+            };
+          });
 
       } catch (error) {
         console.error('HF API error:', error);
