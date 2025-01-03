@@ -333,35 +333,27 @@ export class SearchService extends EventEmitter {
       console.log(`Received HTML from ${source} (${html.length} bytes)`);
 
       try {
-        // Let HF parse the HTML and extract event data
         const response = await hf.textGeneration({
-          model: 'mistralai/Mixtral-8x7B-Instruct-v0.1',
-          inputs: `Extract all event details from this HTML that match the search query "${params.keyword}" in ${params.location || 'any location'}.
-Only include exact matches for the artist name "${params.keyword}" - do not include related events or parking.
+          model: 'mistralai/Mistral-7B-Instruct-v0.2',
+          inputs: `<s>[INST]Extract events from HTML as JSON array. Format: [{"name":"event name","venue":"venue name","date":"YYYY-MM-DD","city":"city name","state":"ST","country":"US","url":"url path"}]. Return only JSON array.
 
-HTML:
-${html}
-
-Return only a JSON array of objects with these fields:
-[{
-  "name": "full event name",
-  "venue": "venue name",
-  "date": "event date in YYYY-MM-DD format",
-  "city": "city name",
-  "state": "state code",
-  "country": "country code",
-  "url": "relative url path"
-}]`,
+${html}[/INST]</s>`,
           parameters: {
-            max_new_tokens: 500,
+            max_new_tokens: 1000,
             temperature: 0.1,
-            return_full_text: false
+            do_sample: false,
+            stop: ["</s>", "[INST]"]
           }
         });
 
+        console.log('Raw HF response:', response.generated_text);
         let eventsData: any[];
         try {
-          const parsed = JSON.parse(response.generated_text?.trim() || '[]');
+          // Find the last occurrence of a JSON array (after the HTML)
+          const lastJsonMatch = response.generated_text.split('</body></html>')[1]?.match(/\[\s*{[\s\S]*}\s*\]/);
+          const cleanedResponse = lastJsonMatch ? lastJsonMatch[0] : '[]';
+          console.log('Cleaned response:', cleanedResponse);
+          const parsed = JSON.parse(cleanedResponse);
           eventsData = Array.isArray(parsed) ? parsed : [parsed];
           console.log('Parsed event data:', eventsData);
         } catch (e) {
@@ -377,66 +369,28 @@ Return only a JSON array of objects with these fields:
             const normalizedKeyword = params.keyword.toLowerCase().trim();
             
             // Only include exact matches for the artist name
-            // Exclude parking, VIP packages, and other related events
             return normalizedEventName === normalizedKeyword || 
                    normalizedEventName === normalizedKeyword + ' concert' ||
                    normalizedEventName === normalizedKeyword + ' live';
           })
-          .map(eventData => {
-            // Convert date string to ISO format
-            let eventDate = eventData.date;
-            if (!eventData.date.includes('-')) {
-              // Handle dates like "Jan 11" by adding current year
-              const currentYear = new Date().getFullYear();
-              const dateParts = eventData.date.split(' ');
-              const month = dateParts[0];
-              const day = parseInt(dateParts[1]);
-              eventDate = `${currentYear}-${new Date(`${month} 1 2024`).getMonth() + 1}-${day.toString().padStart(2, '0')}`;
-            }
-
-            const fullUrl = source === 'vividseats'
-              ? `https://www.vividseats.com${eventData.url || ''}`
-              : `https://www.stubhub.com${eventData.url || ''}`;
-
-            return {
-              name: eventData.name,
-              venue: eventData.venue,
-              date: eventDate,
-              location: {
-                city: eventData.city,
-                state: eventData.state,
-                country: eventData.country || 'USA'
-              },
-              source,
-              url: fullUrl,
-              tickets: [] as TicketData[]
-            };
-          });
-
-        // Visit each event page to get tickets
-        for (const event of events) {
-          try {
-            this.emit('status', `Fetching tickets for ${event.name} from ${event.source}...`);
-            const eventHtml = await webReaderService.fetchPage(event.url, {
-              headers: {
-                'X-Wait-For-Selector': event.source === 'vividseats' 
-                  ? '[data-testid="listings-container"]'
-                  : '[data-testid="ticket-list"]',
-                'X-Target-Selector': event.source === 'vividseats'
-                  ? '[data-testid="listings-container"] [data-testid="ticketListing"]'
-                  : '[data-testid="ticket-list"] [data-testid="ticket-row"]'
-              }
-            });
-            const ticketData = await this.parseEventPage(eventHtml, event.source);
-            if (ticketData?.tickets) {
-              event.tickets = ticketData.tickets;
-            }
-          } catch (error) {
-            console.error(`Error fetching tickets for ${event.name}:`, error);
-          }
-        }
+          .map(eventData => ({
+            name: eventData.name,
+            venue: eventData.venue,
+            date: eventData.date,
+            location: {
+              city: eventData.city,
+              state: eventData.state,
+              country: eventData.country || 'US'
+            },
+            source,
+            url: eventData.url.startsWith('http') ? eventData.url : 
+                 source === 'vividseats' ? `https://www.vividseats.com${eventData.url}` :
+                 `https://www.stubhub.com${eventData.url}`,
+            tickets: []
+          }));
 
         return events;
+
       } catch (error) {
         console.error('HF API error:', error);
         throw error;
