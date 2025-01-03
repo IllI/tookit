@@ -282,6 +282,12 @@ export class SearchService extends EventEmitter {
           if (existingEvent) {
             eventId = existingEvent.id;
             await this.addEventLink(eventId, event.source!, event.url!);
+            // Immediately visit the event page after adding the link
+            this.processEventPage(eventId, event.source!, event.url!)
+              .catch(error => {
+                console.error(`Error processing event page for ${event.name}:`, error);
+                this.emit('error', `Error processing event page for ${event.name}: ${error.message}`);
+              });
           } else {
             // Create new event
             const { data: newEvent } = await this.supabase
@@ -301,6 +307,12 @@ export class SearchService extends EventEmitter {
             if (newEvent) {
               eventId = newEvent.id;
               await this.addEventLink(eventId, event.source!, event.url!);
+              // Immediately visit the event page after adding the link
+              this.processEventPage(eventId, event.source!, event.url!)
+                .catch(error => {
+                  console.error(`Error processing event page for ${event.name}:`, error);
+                  this.emit('error', `Error processing event page for ${event.name}: ${error.message}`);
+                });
             }
           }
 
@@ -403,62 +415,50 @@ ${html}[/INST]</s>`,
 
   private async parseEventPage(html: string, source: string) {
     try {
-      const tickets: TicketData[] = [];
-      const $ = cheerio.load(html);
+      const response = await hf.textGeneration({
+        model: 'mistralai/Mistral-7B-Instruct-v0.2',
+        inputs: `<s>[INST]Extract ticket listings from HTML as JSON array. Format: [{"section":"section name","row":"row name","price":123.45,"quantity":2,"source":"${source}","listing_id":"unique id"}]. Return only JSON array.
 
-      if (source === 'vividseats') {
-        // Find ticket listings
-        $('[data-testid="ticketListing"]').each((_, element) => {
-          const section = $(element).find('[data-testid="section"]').text().trim();
-          const row = $(element).find('[data-testid="row"]').text().trim();
-          const priceText = $(element).find('[data-testid="price"]').text().trim();
-          const quantityText = $(element).find('[data-testid="quantity"]').text().trim();
-          const listingId = $(element).attr('data-listing-id');
+${html}[/INST]</s>`,
+        parameters: {
+          max_new_tokens: 1000,
+          temperature: 0.1,
+          do_sample: false,
+          stop: ["</s>", "[INST]"]
+        }
+      });
 
-          if (section && priceText) {
-            const price = parseFloat(priceText.replace(/[^0-9.]/g, ''));
-            const quantity = parseInt(quantityText?.replace(/[^0-9]/g, '') || '0', 10);
-
-            tickets.push({
-              section,
-              row,
-              price,
-              quantity,
-              source: 'vividseats',
-              listing_id: listingId || `vs-${Date.now()}-${Math.random().toString(36).substring(7)}`
-            });
-          }
-        });
-      } else if (source === 'stubhub') {
-        // Find ticket listings
-        $('[data-testid="ticket-row"]').each((_, element) => {
-          const section = $(element).find('[data-testid="section-name"]').text().trim();
-          const row = $(element).find('[data-testid="row-name"]').text().trim();
-          const priceText = $(element).find('[data-testid="ticket-price"]').text().trim();
-          const quantityText = $(element).find('[data-testid="ticket-quantity"]').text().trim();
-          const listingId = $(element).attr('data-listing-id') || $(element).attr('id');
-
-          if (section && priceText) {
-            const price = parseFloat(priceText.replace(/[^0-9.]/g, ''));
-            const quantity = parseInt(quantityText?.replace(/[^0-9]/g, '') || '0', 10);
-
-            tickets.push({
-              section,
-              row,
-              price,
-              quantity,
-              source: 'stubhub',
-              listing_id: listingId || `sh-${Date.now()}-${Math.random().toString(36).substring(7)}`
-            });
-          }
-        });
+      console.log('Raw HF response:', response.generated_text);
+      let tickets: TicketData[];
+      try {
+        // Find the last occurrence of a JSON array (after the HTML)
+        const lastJsonMatch = response.generated_text.split('</body></html>')[1]?.match(/\[\s*{[\s\S]*}\s*\]/);
+        const cleanedResponse = lastJsonMatch ? lastJsonMatch[0] : '[]';
+        console.log('Cleaned response:', cleanedResponse);
+        const parsed = JSON.parse(cleanedResponse);
+        tickets = Array.isArray(parsed) ? parsed : [parsed];
+        console.log(`Found ${tickets.length} tickets from ${source}`);
+      } catch (e) {
+        console.error('Failed to parse HF response:', e);
+        return { tickets: [] };
       }
 
-      console.log(`Found ${tickets.length} tickets from ${source}`);
       return { tickets };
     } catch (error) {
       console.error(`Error parsing ${source} event page:`, error);
       return { tickets: [] };
+    }
+  }
+
+  // Add new method to handle event page processing
+  private async processEventPage(eventId: string, source: string, url: string) {
+    this.emit('status', `Processing event page from ${source}...`);
+    
+    const html = await webReaderService.fetchPage(url);
+    const result = await this.parseEventPage(html, source);
+    
+    if (result?.tickets) {
+      await this.saveTickets(eventId, result.tickets);
     }
   }
 }

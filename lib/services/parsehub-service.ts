@@ -13,8 +13,9 @@ class WebReaderService {
       console.log('Fetching page:', url);
       
       // Determine the correct selectors based on URL and page type
-      let waitForSelector;
-      let targetSelector;
+      let waitForSelector = 'body';  // Default fallback
+      let targetSelector = 'body';   // Default fallback
+      
       if (url.includes('vividseats.com')) {
         if (url.includes('/search')) {
           waitForSelector = '[data-testid="productions-list"]';
@@ -48,15 +49,12 @@ class WebReaderService {
         'Accept': 'application/json',
         'X-Return-Format': 'html',
         'X-Retain-Images': 'none',
+        'X-Wait-For-Selector': waitForSelector,
+        'X-Target-Selector': targetSelector,
+        'X-Wait-For-Selector-Timeout': '10',
+        'X-Browser-Locale': 'en-US',
         ...options.headers
       };
-      
-      if (waitForSelector) {
-        headers['X-Wait-For-Selector'] = waitForSelector;
-      }
-      if (targetSelector) {
-        headers['X-Target-Selector'] = targetSelector;
-      }
 
       const response = await fetch(readerUrl, {
         method: 'GET',
@@ -64,7 +62,9 @@ class WebReaderService {
       });
 
       if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+        const errorText = await response.text();
+        console.error('Jina Reader error response:', errorText);
+        throw new Error(`HTTP error! status: ${response.status}, details: ${errorText}`);
       }
 
       const jsonResponse = await response.json();
