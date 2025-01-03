@@ -433,7 +433,7 @@ ${html}[/INST]</s>`,
       try {
         // Find the last occurrence of a JSON array (after the HTML)
         const lastJsonMatch = response.generated_text.split('</body></html>')[1]?.match(/\[\s*{[\s\S]*}\s*\]/);
-        const cleanedResponse = lastJsonMatch ? lastJsonMatch[0] : '[]';
+        const cleanedResponse = lastJsonMatch ? lastJsonMatch[0].replace(/\\_/g, '_') : '[]';
         console.log('Cleaned response:', cleanedResponse);
         const parsed = JSON.parse(cleanedResponse);
         tickets = Array.isArray(parsed) ? parsed : [parsed];
