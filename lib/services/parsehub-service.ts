@@ -32,7 +32,7 @@ class WebReaderService {
           targetSelector = '[data-testid="primaryGrid"] a';
         } else {
           waitForSelector = '#listings-container';
-          targetSelector = '#listings-container a';
+          targetSelector = '#listings-container [data-is-sold="0"]';
         }
       }
 
