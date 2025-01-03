@@ -370,7 +370,7 @@ Return only a JSON array of objects with these fields:
         }
 
         // Filter and convert events to EventData format
-        return eventsData
+        const events = eventsData
           .filter(eventData => {
             // Normalize event name and search keyword for comparison
             const normalizedEventName = eventData.name.toLowerCase().trim();
@@ -394,6 +394,10 @@ Return only a JSON array of objects with these fields:
               eventDate = `${currentYear}-${new Date(`${month} 1 2024`).getMonth() + 1}-${day.toString().padStart(2, '0')}`;
             }
 
+            const fullUrl = source === 'vividseats'
+              ? `https://www.vividseats.com${eventData.url || ''}`
+              : `https://www.stubhub.com${eventData.url || ''}`;
+
             return {
               name: eventData.name,
               venue: eventData.venue,
@@ -404,13 +408,35 @@ Return only a JSON array of objects with these fields:
                 country: eventData.country || 'USA'
               },
               source,
-              url: source === 'vividseats'
-                ? `https://www.vividseats.com${eventData.url || ''}`
-                : `https://www.stubhub.com${eventData.url || ''}`,
-              tickets: []
+              url: fullUrl,
+              tickets: [] as TicketData[]
             };
           });
 
+        // Visit each event page to get tickets
+        for (const event of events) {
+          try {
+            this.emit('status', `Fetching tickets for ${event.name} from ${event.source}...`);
+            const eventHtml = await webReaderService.fetchPage(event.url, {
+              headers: {
+                'X-Wait-For-Selector': event.source === 'vividseats' 
+                  ? '[data-testid="listings-container"]'
+                  : '[data-testid="ticket-list"]',
+                'X-Target-Selector': event.source === 'vividseats'
+                  ? '[data-testid="listings-container"] [data-testid="ticketListing"]'
+                  : '[data-testid="ticket-list"] [data-testid="ticket-row"]'
+              }
+            });
+            const ticketData = await this.parseEventPage(eventHtml, event.source);
+            if (ticketData?.tickets) {
+              event.tickets = ticketData.tickets;
+            }
+          } catch (error) {
+            console.error(`Error fetching tickets for ${event.name}:`, error);
+          }
+        }
+
+        return events;
       } catch (error) {
         console.error('HF API error:', error);
         throw error;
@@ -424,18 +450,16 @@ Return only a JSON array of objects with these fields:
   private async parseEventPage(html: string, source: string) {
     try {
       const tickets: TicketData[] = [];
-      const parser = new DOMParser();
-      const doc = parser.parseFromString(html, 'text/html');
+      const $ = cheerio.load(html);
 
       if (source === 'vividseats') {
         // Find ticket listings
-        const ticketElements = doc.querySelectorAll('[data-testid="ticketListing"]');
-        ticketElements.forEach(element => {
-          const section = element.querySelector('[data-testid="sectionName"]')?.textContent?.trim();
-          const row = element.querySelector('[data-testid="rowName"]')?.textContent?.trim();
-          const priceText = element.querySelector('[data-testid="price"]')?.textContent?.trim();
-          const quantityText = element.querySelector('[data-testid="quantity"]')?.textContent?.trim();
-          const listingId = element.getAttribute('data-listing-id');
+        $('[data-testid="ticketListing"]').each((_, element) => {
+          const section = $(element).find('[data-testid="section"]').text().trim();
+          const row = $(element).find('[data-testid="row"]').text().trim();
+          const priceText = $(element).find('[data-testid="price"]').text().trim();
+          const quantityText = $(element).find('[data-testid="quantity"]').text().trim();
+          const listingId = $(element).attr('data-listing-id');
 
           if (section && priceText) {
             const price = parseFloat(priceText.replace(/[^0-9.]/g, ''));
@@ -453,13 +477,12 @@ Return only a JSON array of objects with these fields:
         });
       } else if (source === 'stubhub') {
         // Find ticket listings
-        const ticketElements = doc.querySelectorAll('.ticket-listing');
-        ticketElements.forEach(element => {
-          const section = element.querySelector('.section-name')?.textContent?.trim();
-          const row = element.querySelector('.row-name')?.textContent?.trim();
-          const priceText = element.querySelector('.price')?.textContent?.trim();
-          const quantityText = element.querySelector('.quantity')?.textContent?.trim();
-          const listingId = element.getAttribute('data-listing-id');
+        $('[data-testid="ticket-row"]').each((_, element) => {
+          const section = $(element).find('[data-testid="section-name"]').text().trim();
+          const row = $(element).find('[data-testid="row-name"]').text().trim();
+          const priceText = $(element).find('[data-testid="ticket-price"]').text().trim();
+          const quantityText = $(element).find('[data-testid="ticket-quantity"]').text().trim();
+          const listingId = $(element).attr('data-listing-id') || $(element).attr('id');
 
           if (section && priceText) {
             const price = parseFloat(priceText.replace(/[^0-9.]/g, ''));
