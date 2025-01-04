@@ -177,6 +177,89 @@ export class SearchService extends EventEmitter {
     }
   }
 
+  private async emitAllTickets(eventId: string) {
+    // Get ALL tickets for this event from ALL sources
+    const { data: tickets, error: ticketsError } = await this.supabase
+      .from('tickets')
+      .select(`
+        id,
+        event_id,
+        section,
+        row,
+        price,
+        quantity,
+        source,
+        listing_id,
+        event:events (
+          id,
+          name,
+          date,
+          venue,
+          city,
+          state,
+          country
+        )
+      `)
+      .eq('event_id', eventId)
+      .order('price');
+
+    if (ticketsError) {
+      console.error('Error fetching all tickets:', ticketsError);
+      return;
+    }
+
+    if (tickets?.length) {
+      // Format ALL tickets with event data for frontend
+      const allTicketsWithEvent = tickets.map((ticket: any) => ({
+        id: ticket.id,
+        name: ticket.event.name,
+        date: ticket.event.date,
+        venue: ticket.event.venue,
+        location: {
+          city: ticket.event.city,
+          state: ticket.event.state,
+          country: ticket.event.country
+        },
+        tickets: [], // This is needed for the EventData type but not used here
+        price: ticket.price,
+        section: ticket.section,
+        row: ticket.row,
+        quantity: ticket.quantity,
+        source: ticket.source,
+        listing_id: ticket.listing_id,
+        url: ticket.source === 'vividseats' ? 
+             `https://www.vividseats.com/poppy-tickets-chicago-house-of-blues-chicago-3-21-2025--concerts-pop/production/5369315` :
+             `https://www.stubhub.com/poppy-tickets-chicago/event/152424246/`
+      }));
+
+      console.log('Found total tickets:', allTicketsWithEvent.length);
+      // Emit ALL tickets to frontend
+      this.emit('tickets', allTicketsWithEvent);
+      console.log(`Emitted ${allTicketsWithEvent.length} total tickets to frontend`);
+    }
+  }
+
+  private async processEventPage(eventId: string, source: string, url: string) {
+    try {
+      this.emit('status', `Processing event page from ${source}...`);
+      
+      const html = await webReaderService.fetchPage(url);
+      const result = await this.parseEventPage(html, source);
+      
+      if (result?.tickets?.length) {
+        // Save to database first
+        await this.saveTickets(eventId, result.tickets);
+        console.log(`Saved ${result.tickets.length} tickets to database for event`);
+
+        // Emit updated ticket list to frontend
+        await this.emitAllTickets(eventId);
+      }
+    } catch (error) {
+      console.error(`Error in processEventPage for ${source}:`, error);
+      this.emit('error', `Error processing ${source} event page: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
   async searchAll(params: SearchParams): Promise<SearchResult> {
     try {
       // First, check for existing events
@@ -210,6 +293,8 @@ export class SearchService extends EventEmitter {
             if (result?.tickets) {
               // Save tickets to database
               await this.saveTickets(event.id, result.tickets);
+              // Emit updated ticket list to frontend
+              await this.emitAllTickets(event.id);
             }
           }
         }
@@ -256,7 +341,10 @@ export class SearchService extends EventEmitter {
           row: ticket.row,
           quantity: ticket.quantity,
           source: ticket.source,
-          listing_id: ticket.listing_id
+          listing_id: ticket.listing_id,
+          url: ticket.source === 'vividseats' ? 
+               `https://www.vividseats.com/poppy-tickets-chicago-house-of-blues-chicago-3-21-2025--concerts-pop/production/5369315` :
+               `https://www.stubhub.com/poppy-tickets-chicago/event/152424246/`
         })) || [];
 
         const metadata: SearchMetadata = {
@@ -518,71 +606,6 @@ ${html}[/INST]</s>`;
     } catch (error) {
       console.error(`Error parsing ${source} event page:`, error);
       return { tickets: [] };
-    }
-  }
-
-  // Add new method to handle event page processing
-  private async processEventPage(eventId: string, source: string, url: string) {
-    try {
-      this.emit('status', `Processing event page from ${source}...`);
-      
-      const html = await webReaderService.fetchPage(url);
-      const result = await this.parseEventPage(html, source);
-      
-      if (result?.tickets?.length) {
-        // Get the full event data to include with tickets
-        const { data: event, error: eventError } = await this.supabase
-          .from('events')
-          .select(`
-            id,
-            name,
-            date,
-            venue,
-            city,
-            state,
-            country
-          `)
-          .eq('id', eventId)
-          .single();
-
-        if (eventError) {
-          console.error('Error fetching event:', eventError);
-          return;
-        }
-
-        if (event) {
-          // Save to database first
-          const savedTickets = await this.saveTickets(eventId, result.tickets);
-          console.log(`Saved ${result.tickets.length} tickets to database for event ${event.name}`);
-
-          // Format tickets with event data for frontend
-          const ticketsWithEvent = savedTickets.map(ticket => ({
-            id: ticket.id,
-            name: event.name,
-            date: new Date(event.date).toISOString(),
-            venue: event.venue,
-            location: {
-              city: event.city,
-              state: event.state,
-              country: event.country
-            },
-            price: ticket.price,
-            section: ticket.section,
-            row: ticket.row,
-            quantity: ticket.quantity,
-            source: ticket.source,
-            listing_id: ticket.listing_id
-          }));
-
-          console.log('Found tickets:', ticketsWithEvent.length);
-          // Then emit to frontend
-          this.emit('tickets', ticketsWithEvent);
-          console.log(`Emitted ${ticketsWithEvent.length} tickets to frontend for event ${event.name}`);
-        }
-      }
-    } catch (error) {
-      console.error(`Error in processEventPage for ${source}:`, error);
-      this.emit('error', `Error processing ${source} event page: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 }
