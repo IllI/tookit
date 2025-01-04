@@ -22,7 +22,7 @@ class WebReaderService {
           targetSelector = '[data-testid="productions-list"] a';
         } else {
           waitForSelector = '[data-testid="listings-container"]';
-          targetSelector = '[data-testid="listings-container"] a';
+          targetSelector = '[data-testid="listings-container"] a';  // Removed 'a' suffix
         }
       } else if (url.includes('stubhub.com')) {
         // Remove /secure/ from StubHub URLs as it causes issues

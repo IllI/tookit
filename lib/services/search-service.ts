@@ -455,12 +455,12 @@ Return only JSON array.
 
 ${html}[/INST]</s>` :
         `<s>[INST]Extract ticket listings from HTML as JSON array. For StubHub listings:
-- Extract section from the section name text
-- Extract row from the row text if available
-- Extract exact price (number only)
-- Extract quantity from available tickets text
-- Use the listing ID from data attributes
-Format: [{"section":"Floor GA","row":"GA","price":123.45,"quantity":2,"source":"stubhub","listing_id":"123456"}]
+- Extract section from the section name text (e.g. "Floor GA", "GA Standing", etc)
+- Extract row from the row text if available (e.g. "Row GA1", "GA", etc)
+- Extract price as a number (e.g. 123.45)
+- Extract quantity from text like "2 tickets available"
+- Use the data-listing-id or similar attribute as listing_id
+Format: [{"section":"Floor GA","row":"GA1","price":123.45,"quantity":2,"source":"stubhub","listing_id":"123456"}]
 Return only JSON array.
 
 ${html}[/INST]</s>`;
@@ -552,28 +552,29 @@ ${html}[/INST]</s>`;
 
         if (event) {
           // Save to database first
-          await this.saveTickets(eventId, result.tickets);
+          const savedTickets = await this.saveTickets(eventId, result.tickets);
           console.log(`Saved ${result.tickets.length} tickets to database for event ${event.name}`);
 
           // Format tickets with event data for frontend
-          const ticketsWithEvent = result.tickets.map(ticket => ({
-            id: crypto.randomUUID(), // Generate a unique ID for the frontend
+          const ticketsWithEvent = savedTickets.map(ticket => ({
+            id: ticket.id,
             name: event.name,
-            date: event.date,
+            date: new Date(event.date).toISOString(),
             venue: event.venue,
             location: {
               city: event.city,
               state: event.state,
               country: event.country
             },
-            price: parseFloat(ticket.price.toString()),
-            section: ticket.section || '',
-            row: ticket.row || '',
-            quantity: parseInt(ticket.quantity?.toString() || '1'),
+            price: ticket.price,
+            section: ticket.section,
+            row: ticket.row,
+            quantity: ticket.quantity,
             source: ticket.source,
-            listing_id: ticket.listing_id || crypto.randomUUID()
+            listing_id: ticket.listing_id
           }));
 
+          console.log('Found tickets:', ticketsWithEvent.length);
           // Then emit to frontend
           this.emit('tickets', ticketsWithEvent);
           console.log(`Emitted ${ticketsWithEvent.length} tickets to frontend for event ${event.name}`);
