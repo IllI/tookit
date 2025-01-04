@@ -126,6 +126,7 @@ export class SearchService extends EventEmitter {
         quantity: parseInt(ticket.quantity?.toString() || '1'),
         source: ticket.source,
         listing_id: ticket.listing_id || crypto.randomUUID(),
+        ticket_url: ticket.ticket_url,
         created_at: new Date().toISOString()
       }));
 
@@ -178,7 +179,7 @@ export class SearchService extends EventEmitter {
   }
 
   private async emitAllTickets(eventId: string) {
-    // Get ALL tickets for this event from ALL sources
+    // Get ALL tickets for this event from ALL sources, including event links
     const { data: tickets, error: ticketsError } = await this.supabase
       .from('tickets')
       .select(`
@@ -190,6 +191,7 @@ export class SearchService extends EventEmitter {
         quantity,
         source,
         listing_id,
+        ticket_url,
         event:events (
           id,
           name,
@@ -197,7 +199,11 @@ export class SearchService extends EventEmitter {
           venue,
           city,
           state,
-          country
+          country,
+          event_links (
+            source,
+            url
+          )
         )
       `)
       .eq('event_id', eventId)
@@ -210,27 +216,33 @@ export class SearchService extends EventEmitter {
 
     if (tickets?.length) {
       // Format ALL tickets with event data for frontend
-      const allTicketsWithEvent = tickets.map((ticket: any) => ({
-        id: ticket.id,
-        name: ticket.event.name,
-        date: ticket.event.date,
-        venue: ticket.event.venue,
-        location: {
-          city: ticket.event.city,
-          state: ticket.event.state,
-          country: ticket.event.country
-        },
-        tickets: [], // This is needed for the EventData type but not used here
-        price: ticket.price,
-        section: ticket.section,
-        row: ticket.row,
-        quantity: ticket.quantity,
-        source: ticket.source,
-        listing_id: ticket.listing_id,
-        url: ticket.source === 'vividseats' ? 
-             `https://www.vividseats.com/poppy-tickets-chicago-house-of-blues-chicago-3-21-2025--concerts-pop/production/5369315` :
-             `https://www.stubhub.com/poppy-tickets-chicago/event/152424246/`
-      }));
+      const allTicketsWithEvent = tickets.map((ticket: any) => {
+        // Find the event link for this ticket's source
+        const eventLink = ticket.event.event_links.find((link: any) => link.source === ticket.source);
+        
+        // Use ticket-specific URL if available, otherwise fall back to event URL
+        const ticketUrl = ticket.ticket_url || (eventLink ? eventLink.url : null);
+
+        return {
+          id: ticket.id,
+          name: ticket.event.name,
+          date: ticket.event.date,
+          venue: ticket.event.venue,
+          location: {
+            city: ticket.event.city,
+            state: ticket.event.state,
+            country: ticket.event.country
+          },
+          tickets: [], // This is needed for the EventData type but not used here
+          price: ticket.price,
+          section: ticket.section,
+          row: ticket.row,
+          quantity: ticket.quantity,
+          source: ticket.source,
+          listing_id: ticket.listing_id,
+          url: ticketUrl // Use the determined URL
+        };
+      });
 
       console.log('Found total tickets:', allTicketsWithEvent.length);
       // Emit ALL tickets to frontend
@@ -534,11 +546,12 @@ ${html}[/INST]</s>`,
       // Use source-specific prompts to handle different HTML structures
       const prompt = source === 'vividseats' ?
         `<s>[INST]Extract ticket listings from HTML as JSON array. For VividSeats listings:
-- If section contains "GA", use that as the section name
-- If row contains "Row", extract just the row number/letter
-- Extract quantity from text like "1-6 tickets" or "2 tickets" as a number
-- Use the data-testid attribute as the listing_id
-Format: [{"section":"GA Floor","row":"G1","price":123.45,"quantity":2,"source":"vividseats","listing_id":"unique-id"}]
+- Extract section name (e.g. "GA Main Floor", "GA Balcony", "GA4")
+- Extract row number/letter after "Row" text
+- Extract price as a number
+- Extract quantity from text like "1-6 tickets" or "2 tickets"
+- Use the data-testid attribute as listing_id
+Format: [{"section":"GA4","row":"G4","price":79,"quantity":1,"source":"vividseats","listing_id":"VB11556562645"}]
 Return only JSON array.
 
 ${html}[/INST]</s>` :
@@ -580,7 +593,10 @@ ${html}[/INST]</s>`;
           price: parseFloat(ticket.price?.toString() || '0'),
           quantity: parseInt(ticket.quantity?.toString() || '1'),
           source: ticket.source || source,
-          listing_id: ticket.listing_id || crypto.randomUUID()
+          listing_id: ticket.listing_id || crypto.randomUUID(),
+          ticket_url: source === 'vividseats' ? 
+            `https://www.vividseats.com/poppy-tickets-chicago-house-of-blues-chicago-3-21-2025--concerts-pop/production/5369315?showDetails=${ticket.listing_id}` : 
+            null,
         })).filter(ticket => 
           ticket.price > 0 && 
           ticket.quantity > 0 && 

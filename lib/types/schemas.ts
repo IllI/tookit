@@ -21,6 +21,7 @@ export interface TicketData {
   listing_id: string;
   source: string;
   event_id?: string;
+  ticket_url?: string | null;
 }
 
 export interface EventData extends Event {
