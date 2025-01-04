@@ -1,77 +1,78 @@
-class WebReaderService {
-  private baseUrl: string;
-  private apiKey: string;
+import { load } from 'cheerio';
 
-  constructor() {
-    this.baseUrl = 'https://r.jina.ai';
-    // This should be moved to environment variables
-    this.apiKey = 'jina_05f4e4d4edbd415cb82c132e3b6c3be1IR3qvg8aiuG9ywtSiO0zGtQL3ocS';
+class WebReaderService {
+  private getSelectors(url: string): { waitForSelector: string; targetSelector: string } {
+    if (url.includes('vividseats.com')) {
+      if (url.includes('/search')) {
+        return {
+          waitForSelector: '[data-testid="productions-list"]',
+          targetSelector: '[data-testid="productions-list"] a'
+        };
+      } else {
+        return {
+          waitForSelector: '[data-testid="listings-container"]',
+          targetSelector: '[data-testid="listings-container"]'
+        };
+      }
+    } else if (url.includes('stubhub.com')) {
+      if (url.includes('/search')) {
+        return {
+          waitForSelector: '[data-testid="primaryGrid"]',
+          targetSelector: '[data-testid="primaryGrid"] a'
+        };
+      } else {
+        return {
+          waitForSelector: '#listings-container',
+          targetSelector: '#listings-container [data-is-sold="0"]'
+        };
+      }
+    }
+    return {
+      waitForSelector: 'body',
+      targetSelector: 'body'
+    };
   }
 
   async fetchPage(url: string, options: { headers?: Record<string, string> } = {}): Promise<string> {
     try {
       console.log('Fetching page:', url);
-      
-      // Determine the correct selectors based on URL and page type
-      let waitForSelector = 'body';  // Default fallback
-      let targetSelector = 'body';   // Default fallback
-      
-      if (url.includes('vividseats.com')) {
-        if (url.includes('/search')) {
-          waitForSelector = '[data-testid="productions-list"]';
-          targetSelector = '[data-testid="productions-list"] a';
-        } else {
-          waitForSelector = '[data-testid="listings-container"]';
-          targetSelector = '[data-testid="listings-container"] a';  // Removed 'a' suffix
-        }
-      } else if (url.includes('stubhub.com')) {
-        // Remove /secure/ from StubHub URLs as it causes issues
-        url = url.replace('/secure/', '/');
-        if (url.includes('/search')) {
-          waitForSelector = '[data-testid="primaryGrid"]';
-          targetSelector = '[data-testid="primaryGrid"] a';
-        } else {
-          waitForSelector = '#listings-container';
-          targetSelector = '#listings-container [data-is-sold="0"]';
-        }
-      }
 
-      // Encode the URL
-      const encodedUrl = encodeURIComponent(url);
-      const readerUrl = `${this.baseUrl}/${encodedUrl}`;
-      
-      console.log('Reader URL:', readerUrl);
-      console.log('Waiting for selector:', waitForSelector);
-      console.log('Target selector:', targetSelector);
+      // Get the appropriate selectors for this URL
+      const selectors = this.getSelectors(url);
+      console.log('Using selectors:', selectors);
 
-      const headers: Record<string, string> = {
-        'Authorization': `Bearer ${this.apiKey}`,
-        'Accept': 'application/json',
-        'X-Return-Format': 'html',
-        'X-Retain-Images': 'none',
-        'X-Wait-For-Selector': waitForSelector,
-        'X-Target-Selector': targetSelector,
-        'X-Wait-For-Selector-Timeout': '10',
-        'X-Browser-Locale': 'en-US',
-        ...options.headers
-      };
+      // Parse URL to get hostname and path
+      const proxyUrl = new URL(`https://r.jina.ai/${url}`);
 
-      const response = await fetch(readerUrl, {
+      const response = await fetch(proxyUrl, {
         method: 'GET',
-        headers
+        headers: {
+          'Accept': 'application/json',
+          'X-Return-Format': 'html',
+          'X-Target-Selector': selectors.targetSelector,
+          'X-Wait-For-Selector': selectors.waitForSelector,
+          ...options.headers
+        }
       });
 
       if (!response.ok) {
         const errorText = await response.text();
-        console.error('Jina Reader error response:', errorText);
         throw new Error(`HTTP error! status: ${response.status}, details: ${errorText}`);
       }
 
-      const jsonResponse = await response.json();
-      if (jsonResponse?.data?.html) {
-        return jsonResponse.data.html;
+      const text = await response.text();
+      
+      try {
+        const jsonResponse = JSON.parse(text);
+        if (jsonResponse.data?.html) {
+          console.log(`Received HTML from ${url.includes('vividseats') ? 'vividseats' : 'stubhub'} (${jsonResponse.data.html.length} bytes)`);
+          return jsonResponse.data.html;
+        }
+      } catch (e) {
+        console.warn('Response was not JSON:', e instanceof Error ? e.message : String(e));
       }
-      throw new Error('No HTML content in response');
+      
+      return text;
     } catch (error) {
       console.error('Error fetching page:', error);
       throw error;
