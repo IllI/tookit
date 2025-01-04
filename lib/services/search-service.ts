@@ -130,15 +130,43 @@ export class SearchService extends EventEmitter {
       }));
 
       console.log('Saving tickets to database:', formattedTickets);
-      const { data, error } = await this.supabase
+      
+      // First, delete existing tickets for this event/source combination
+      const { error: deleteError } = await this.supabase
         .from('tickets')
-        .upsert(formattedTickets, {
-          onConflict: 'event_id,section,row,listing_id'
-        });
+        .delete()
+        .eq('event_id', eventId)
+        .eq('source', tickets[0]?.source);
 
-      if (error) {
-        console.error('Database error saving tickets:', error);
-        throw error;
+      if (deleteError) {
+        console.error('Error deleting existing tickets:', deleteError);
+        throw deleteError;
+      }
+
+      // Then insert new tickets in batches to avoid conflicts
+      const batchSize = 50;
+      for (let i = 0; i < formattedTickets.length; i += batchSize) {
+        const batch = formattedTickets.slice(i, i + batchSize);
+        const { error: insertError } = await this.supabase
+          .from('tickets')
+          .insert(batch);
+
+        if (insertError) {
+          console.error('Database error saving tickets batch:', insertError);
+          throw insertError;
+        }
+      }
+
+      // Get all saved tickets
+      const { data, error: selectError } = await this.supabase
+        .from('tickets')
+        .select()
+        .eq('event_id', eventId)
+        .eq('source', tickets[0]?.source);
+
+      if (selectError) {
+        console.error('Error fetching saved tickets:', selectError);
+        throw selectError;
       }
 
       console.log('Successfully saved tickets to database:', data);
@@ -415,11 +443,31 @@ ${html}[/INST]</s>`,
 
   private async parseEventPage(html: string, source: string) {
     try {
+      // Use source-specific prompts to handle different HTML structures
+      const prompt = source === 'vividseats' ?
+        `<s>[INST]Extract ticket listings from HTML as JSON array. For VividSeats listings:
+- If section contains "GA", use that as the section name
+- If row contains "Row", extract just the row number/letter
+- Extract quantity from text like "1-6 tickets" or "2 tickets" as a number
+- Use the data-testid attribute as the listing_id
+Format: [{"section":"GA Floor","row":"G1","price":123.45,"quantity":2,"source":"vividseats","listing_id":"unique-id"}]
+Return only JSON array.
+
+${html}[/INST]</s>` :
+        `<s>[INST]Extract ticket listings from HTML as JSON array. For StubHub listings:
+- Extract section from the section name text
+- Extract row from the row text if available
+- Extract exact price (number only)
+- Extract quantity from available tickets text
+- Use the listing ID from data attributes
+Format: [{"section":"Floor GA","row":"GA","price":123.45,"quantity":2,"source":"stubhub","listing_id":"123456"}]
+Return only JSON array.
+
+${html}[/INST]</s>`;
+
       const response = await hf.textGeneration({
         model: 'mistralai/Mistral-7B-Instruct-v0.2',
-        inputs: `<s>[INST]Extract ticket listings from HTML as JSON array. Format: [{"section":"section name","row":"row name","price":123.45,"quantity":2,"source":"${source}","listing_id":"unique id"}]. Return only JSON array.
-
-${html}[/INST]</s>`,
+        inputs: prompt,
         parameters: {
           max_new_tokens: 1000,
           temperature: 0.1,
@@ -428,7 +476,6 @@ ${html}[/INST]</s>`,
         }
       });
 
-    //  console.log('Raw HF response:', response.generated_text);
       let tickets: TicketData[];
       try {
         // Find the last occurrence of a JSON array (after the HTML)
@@ -437,6 +484,30 @@ ${html}[/INST]</s>`,
         console.log('Cleaned response:', cleanedResponse);
         const parsed = JSON.parse(cleanedResponse);
         tickets = Array.isArray(parsed) ? parsed : [parsed];
+
+        // Clean up and validate the data
+        tickets = tickets.map(ticket => ({
+          section: ticket.section || 'General Admission',
+          row: ticket.row?.replace(/^Row\s+/i, '') || '',  // Remove 'Row ' prefix if present
+          price: parseFloat(ticket.price?.toString() || '0'),
+          quantity: parseInt(ticket.quantity?.toString() || '1'),
+          source: ticket.source || source,
+          listing_id: ticket.listing_id || crypto.randomUUID()
+        })).filter(ticket => 
+          ticket.price > 0 && 
+          ticket.quantity > 0 && 
+          ticket.section.length > 0
+        );
+
+        // Remove duplicates based on section, row, and price
+        tickets = tickets.filter((ticket, index, self) =>
+          index === self.findIndex((t) => (
+            t.section === ticket.section &&
+            t.row === ticket.row &&
+            t.price === ticket.price
+          ))
+        );
+
         console.log(`Found ${tickets.length} tickets from ${source}`);
       } catch (e) {
         console.error('Failed to parse HF response:', e);
