@@ -120,20 +120,29 @@ export class SearchService extends EventEmitter {
     try {
       const formattedTickets = tickets.map(ticket => ({
         event_id: eventId,
-        section: ticket.section,
-        row: ticket.row,
-        price: ticket.price,
-        quantity: ticket.quantity,
+        section: ticket.section || '',
+        row: ticket.row || '',
+        price: parseFloat(ticket.price.toString()),
+        quantity: parseInt(ticket.quantity?.toString() || '1'),
         source: ticket.source,
-        listing_id: ticket.listing_id,
+        listing_id: ticket.listing_id || crypto.randomUUID(),
         created_at: new Date().toISOString()
       }));
 
-      await this.supabase
+      console.log('Saving tickets to database:', formattedTickets);
+      const { data, error } = await this.supabase
         .from('tickets')
         .upsert(formattedTickets, {
           onConflict: 'event_id,section,row,listing_id'
         });
+
+      if (error) {
+        console.error('Database error saving tickets:', error);
+        throw error;
+      }
+
+      console.log('Successfully saved tickets to database:', data);
+      return data;
     } catch (error) {
       console.error('Error saving tickets:', error);
       throw error;
@@ -283,11 +292,7 @@ export class SearchService extends EventEmitter {
             eventId = existingEvent.id;
             await this.addEventLink(eventId, event.source!, event.url!);
             // Immediately visit the event page after adding the link
-            this.processEventPage(eventId, event.source!, event.url!)
-              .catch(error => {
-                console.error(`Error processing event page for ${event.name}:`, error);
-                this.emit('error', `Error processing event page for ${event.name}: ${error.message}`);
-              });
+            await this.processEventPage(eventId, event.source!, event.url!);
           } else {
             // Create new event
             const { data: newEvent } = await this.supabase
@@ -308,11 +313,7 @@ export class SearchService extends EventEmitter {
               eventId = newEvent.id;
               await this.addEventLink(eventId, event.source!, event.url!);
               // Immediately visit the event page after adding the link
-              this.processEventPage(eventId, event.source!, event.url!)
-                .catch(error => {
-                  console.error(`Error processing event page for ${event.name}:`, error);
-                  this.emit('error', `Error processing event page for ${event.name}: ${error.message}`);
-                });
+              await this.processEventPage(eventId, event.source!, event.url!);
             }
           }
 
@@ -358,7 +359,6 @@ ${html}[/INST]</s>`,
           }
         });
 
-        console.log('Raw HF response:', response.generated_text);
         let eventsData: any[];
         try {
           // Find the last occurrence of a JSON array (after the HTML)
@@ -398,7 +398,7 @@ ${html}[/INST]</s>`,
             url: eventData.url.startsWith('http') ? eventData.url : 
                  source === 'vividseats' ? `https://www.vividseats.com${eventData.url}` :
                  `https://www.stubhub.com${eventData.url}`,
-            tickets: []
+            tickets: [] as TicketData[]
           }));
 
         return events;
@@ -428,7 +428,7 @@ ${html}[/INST]</s>`,
         }
       });
 
-      console.log('Raw HF response:', response.generated_text);
+    //  console.log('Raw HF response:', response.generated_text);
       let tickets: TicketData[];
       try {
         // Find the last occurrence of a JSON array (after the HTML)
@@ -452,13 +452,65 @@ ${html}[/INST]</s>`,
 
   // Add new method to handle event page processing
   private async processEventPage(eventId: string, source: string, url: string) {
-    this.emit('status', `Processing event page from ${source}...`);
-    
-    const html = await webReaderService.fetchPage(url);
-    const result = await this.parseEventPage(html, source);
-    
-    if (result?.tickets) {
-      await this.saveTickets(eventId, result.tickets);
+    try {
+      this.emit('status', `Processing event page from ${source}...`);
+      
+      const html = await webReaderService.fetchPage(url);
+      const result = await this.parseEventPage(html, source);
+      
+      if (result?.tickets?.length) {
+        // Get the full event data to include with tickets
+        const { data: event, error: eventError } = await this.supabase
+          .from('events')
+          .select(`
+            id,
+            name,
+            date,
+            venue,
+            city,
+            state,
+            country
+          `)
+          .eq('id', eventId)
+          .single();
+
+        if (eventError) {
+          console.error('Error fetching event:', eventError);
+          return;
+        }
+
+        if (event) {
+          // Save to database first
+          await this.saveTickets(eventId, result.tickets);
+          console.log(`Saved ${result.tickets.length} tickets to database for event ${event.name}`);
+
+          // Format tickets with event data for frontend
+          const ticketsWithEvent = result.tickets.map(ticket => ({
+            id: crypto.randomUUID(), // Generate a unique ID for the frontend
+            name: event.name,
+            date: event.date,
+            venue: event.venue,
+            location: {
+              city: event.city,
+              state: event.state,
+              country: event.country
+            },
+            price: parseFloat(ticket.price.toString()),
+            section: ticket.section || '',
+            row: ticket.row || '',
+            quantity: parseInt(ticket.quantity?.toString() || '1'),
+            source: ticket.source,
+            listing_id: ticket.listing_id || crypto.randomUUID()
+          }));
+
+          // Then emit to frontend
+          this.emit('tickets', ticketsWithEvent);
+          console.log(`Emitted ${ticketsWithEvent.length} tickets to frontend for event ${event.name}`);
+        }
+      }
+    } catch (error) {
+      console.error(`Error in processEventPage for ${source}:`, error);
+      this.emit('error', `Error processing ${source} event page: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 }
