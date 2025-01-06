@@ -215,10 +215,10 @@ export class SearchService extends EventEmitter {
     }
 
     if (tickets?.length) {
-      // Format ALL tickets with event data for frontend
+      // Format tickets with event data for frontend
       const allTicketsWithEvent = tickets.map((ticket: any) => {
         // Find the event link for this ticket's source
-        const eventLink = ticket.event.event_links.find((link: any) => link.source === ticket.source);
+        const eventLink = ticket.event.event_links?.find((link: any) => link.source === ticket.source);
         
         // Use ticket-specific URL if available, otherwise fall back to event URL
         const ticketUrl = ticket.ticket_url || (eventLink ? eventLink.url : null);
@@ -233,14 +233,13 @@ export class SearchService extends EventEmitter {
             state: ticket.event.state,
             country: ticket.event.country
           },
-          tickets: [], // This is needed for the EventData type but not used here
-          price: ticket.price,
           section: ticket.section,
-          row: ticket.row,
-          quantity: ticket.quantity,
+          row: ticket.row || '',
+          price: parseFloat(ticket.price.toString()),
+          quantity: parseInt(ticket.quantity.toString()),
           source: ticket.source,
           listing_id: ticket.listing_id,
-          url: ticketUrl // Use the determined URL
+          ticket_url: ticketUrl
         };
       });
 
@@ -311,7 +310,7 @@ export class SearchService extends EventEmitter {
           }
         }
 
-        // Return updated tickets with full event data
+        // Get all tickets for these events
         const { data: tickets } = await this.supabase
           .from('tickets')
           .select(`
@@ -323,6 +322,7 @@ export class SearchService extends EventEmitter {
             quantity,
             source,
             listing_id,
+            ticket_url,
             event:events (
               id,
               name,
@@ -330,42 +330,52 @@ export class SearchService extends EventEmitter {
               venue,
               city,
               state,
-              country
+              country,
+              event_links (
+                source,
+                url
+              )
             )
           `)
           .in('event_id', existingEvents.map(e => e.id))
           .order('price');
 
-        // Format tickets for frontend
-        const formattedTickets = (tickets as unknown as DbTicket[])?.map(ticket => ({
-          id: ticket.id,
-          name: ticket.event.name,
-          date: ticket.event.date,
-          venue: ticket.event.venue,
-          location: {
-            city: ticket.event.city,
-            state: ticket.event.state,
-            country: ticket.event.country
-          },
-          tickets: [], // Add empty tickets array to match EventData type
-          price: ticket.price,
-          section: ticket.section,
-          row: ticket.row,
-          quantity: ticket.quantity,
-          source: ticket.source,
-          listing_id: ticket.listing_id,
-          url: ticket.source === 'vividseats' ? 
-               `https://www.vividseats.com/poppy-tickets-chicago-house-of-blues-chicago-3-21-2025--concerts-pop/production/5369315` :
-               `https://www.stubhub.com/poppy-tickets-chicago/event/152424246/`
-        })) || [];
+        // Format tickets with event data for frontend
+        const allTicketsWithEvent = tickets?.map((ticket: any) => {
+          // Find the event link for this ticket's source
+          const eventLink = ticket.event.event_links?.find((link: any) => link.source === ticket.source);
+          
+          // Use ticket-specific URL if available, otherwise fall back to event URL
+          const ticketUrl = ticket.ticket_url || (eventLink ? eventLink.url : null);
+
+          return {
+            id: ticket.id,
+            name: ticket.event.name,
+            date: ticket.event.date,
+            venue: ticket.event.venue,
+            location: {
+              city: ticket.event.city,
+              state: ticket.event.state,
+              country: ticket.event.country
+            },
+            tickets: [], // This is needed for the EventData type but not used here
+            price: parseFloat(ticket.price.toString()),
+            section: ticket.section,
+            row: ticket.row || '',
+            quantity: parseInt(ticket.quantity.toString()),
+            source: ticket.source,
+            listing_id: ticket.listing_id,
+            ticket_url: ticketUrl
+          };
+        }) || [];
 
         const metadata: SearchMetadata = {
-          sources: [params.source || 'all']
+          sources: Array.from(new Set(allTicketsWithEvent.map(t => t.source)))
         };
 
         return {
           success: true,
-          data: formattedTickets as EventData[],
+          data: allTicketsWithEvent,
           metadata
         };
       }
@@ -450,12 +460,86 @@ export class SearchService extends EventEmitter {
             await this.saveTickets(eventId, event.tickets);
           }
         }
+
+        // Now get all tickets for the final response
+        const eventIds = await Promise.all(results.data.map(async event => {
+          const existingEvent = await this.findMatchingEvent(event);
+          return existingEvent?.id;
+        }));
+
+        const { data: tickets } = await this.supabase
+          .from('tickets')
+          .select(`
+            id,
+            event_id,
+            section,
+            row,
+            price,
+            quantity,
+            source,
+            listing_id,
+            ticket_url,
+            event:events (
+              id,
+              name,
+              date,
+              venue,
+              city,
+              state,
+              country,
+              event_links (
+                source,
+                url
+              )
+            )
+          `)
+          .in('event_id', eventIds.filter(id => id))
+          .order('price');
+
+        // Format tickets with event data for frontend
+        const allTicketsWithEvent = tickets?.map((ticket: any) => {
+          // Find the event link for this ticket's source
+          const eventLink = ticket.event.event_links?.find((link: any) => link.source === ticket.source);
+          
+          // Use ticket-specific URL if available, otherwise fall back to event URL
+          const ticketUrl = ticket.ticket_url || (eventLink ? eventLink.url : null);
+
+          return {
+            id: ticket.id,
+            name: ticket.event.name,
+            date: ticket.event.date,
+            venue: ticket.event.venue,
+            location: {
+              city: ticket.event.city,
+              state: ticket.event.state,
+              country: ticket.event.country
+            },
+            tickets: [], // This is needed for the EventData type but not used here
+            price: parseFloat(ticket.price.toString()),
+            section: ticket.section,
+            row: ticket.row || '',
+            quantity: parseInt(ticket.quantity.toString()),
+            source: ticket.source,
+            listing_id: ticket.listing_id,
+            ticket_url: ticketUrl
+          };
+        }) || [];
+
+        const metadata: SearchMetadata = {
+          sources: Array.from(new Set(allTicketsWithEvent.map(t => t.source)))
+        };
+
+        return {
+          success: true,
+          data: allTicketsWithEvent,
+          metadata
+        };
       }
 
       return {
         success: true,
-        data: results.data,
-        metadata: results.metadata
+        data: [],
+        metadata: { sources: [] }
       };
 
     } catch (error) {
