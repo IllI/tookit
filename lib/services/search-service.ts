@@ -79,17 +79,57 @@ export class SearchService extends EventEmitter {
 
     if (!venueTimeMatches?.length) return null;
 
+    // Extract the core event name by removing venue and location info
+    function extractCoreName(fullName: string): string {
+      const name = normalizeEventName(fullName);
+      
+      // Remove common venue/location patterns
+      const patterns = [
+        /\bat .+$/i,           // "at Venue Name"
+        /\bin .+$/i,           // "in City Name"
+        /,.+$/,                // ", City, State"
+        /\s*-\s*.+$/,         // "- Additional Info"
+        /\s+tickets?$/i,      // "tickets" at the end
+        /\s+concert$/i,       // "concert" at the end
+        /\s+live$/i,          // "live" at the end
+        /\s+tour$/i           // "tour" at the end
+      ];
+      
+      let coreName = name;
+      patterns.forEach(pattern => {
+        coreName = coreName.replace(pattern, '');
+      });
+      
+      return coreName.trim();
+    }
+
     // Among venue/time matches, find the best name match using fuzzy logic
     const bestMatch = venueTimeMatches.reduce<DbEvent | null>((best, current) => {
-      const similarity = calculateSimilarity(event.name, current.name);
-      const bestSimilarity = best ? calculateSimilarity(event.name, best.name) : 0;
+      const eventCoreName = extractCoreName(event.name);
+      const currentCoreName = extractCoreName(current.name);
+      
+      // Calculate similarity between core names
+      const similarity = calculateJaroWinklerSimilarity(eventCoreName, currentCoreName);
+      const bestSimilarity = best ? calculateJaroWinklerSimilarity(eventCoreName, extractCoreName(best.name)) : 0;
+
+      console.log(`Comparing event names:
+        Original: "${event.name}" -> Core: "${eventCoreName}"
+        Current: "${current.name}" -> Core: "${currentCoreName}"
+        Similarity: ${similarity}
+      `);
 
       return similarity > bestSimilarity ? current : best;
     }, null);
 
-    // Return match if similarity is above threshold (0.6 is more lenient than 0.8)
-    if (bestMatch && calculateSimilarity(event.name, bestMatch.name) >= 0.6) {
-      console.log(`Found matching event: "${event.name}" matches "${bestMatch.name}" (${calculateSimilarity(event.name, bestMatch.name).toFixed(2)} similarity)`);
+    // Use a lower threshold (0.8) since we're matching core names
+    const matchSimilarity = bestMatch ? 
+      calculateJaroWinklerSimilarity(
+        extractCoreName(event.name),
+        extractCoreName(bestMatch.name)
+      ) : 0;
+
+    if (bestMatch && matchSimilarity >= 0.8) {
+      console.log(`Found matching event: "${event.name}" matches "${bestMatch.name}" (${matchSimilarity.toFixed(2)} similarity)`);
       return bestMatch;
     }
 
@@ -588,17 +628,31 @@ ${html}[/INST]</s>`,
         // Filter and convert events to EventData format
         const events = eventsData
           .filter(eventData => {
-            // Normalize event name and search keyword for comparison
-            const normalizedEventName = eventData.name.toLowerCase().trim();
-            const normalizedKeyword = params.keyword.toLowerCase().trim();
+            // Skip obvious auxiliary events by checking venue
+            if (eventData.venue.toLowerCase().includes('parking')) {
+              return false;
+            }
+
+            const normalizedEventName = normalizeEventName(eventData.name);
+            const normalizedKeyword = normalizeEventName(params.keyword);
             
-            // Only include exact matches for the artist name
-            return normalizedEventName === normalizedKeyword || 
-                   normalizedEventName === normalizedKeyword + ' concert' ||
-                   normalizedEventName === normalizedKeyword + ' live';
+            // Check if keyword is at the start of the name
+            if (normalizedEventName.startsWith(normalizedKeyword)) {
+              // Get the next word after the keyword
+              const remainder = normalizedEventName
+                .slice(normalizedKeyword.length)
+                .trim()
+                .split(/\s+/)[0];
+              
+              // Common words that indicate this is the main event
+              const validConnectors = ['at', 'in', 'with', 'and', 'presents', '-'];
+              return !remainder || validConnectors.includes(remainder);
+            }
+
+            return false;
           })
           .map(eventData => ({
-            name: eventData.name,
+            name: params.keyword, // Use the original search keyword as the normalized name
             venue: eventData.venue,
             date: eventData.date,
             location: {
@@ -654,7 +708,6 @@ ${html}[/INST]</s>`;
         model: 'mistralai/Mistral-7B-Instruct-v0.2',
         inputs: prompt,
         parameters: {
-          max_new_tokens: 1000,
           temperature: 0.1,
           do_sample: false,
           stop: ["</s>", "[INST]"]
@@ -719,32 +772,68 @@ function normalizeEventName(name: string): string {
     .trim();
 }
 
-function calculateSimilarity(str1: string, str2: string): number {
-  const normalized1 = normalizeEventName(str1);
-  const normalized2 = normalizeEventName(str2);
-  const maxLength = Math.max(normalized1.length, normalized2.length);
-  const distance = levenshteinDistance(normalized1, normalized2);
-  return (maxLength - distance) / maxLength;
-}
+function calculateJaroWinklerSimilarity(s1: string, s2: string): number {
+  const s1Norm = normalizeEventName(s1);
+  const s2Norm = normalizeEventName(s2);
+  
+  if (s1Norm === s2Norm) return 1;
+  if (s1Norm.length === 0 || s2Norm.length === 0) return 0;
 
-function levenshteinDistance(a: string, b: string): number {
-  const matrix = Array(b.length + 1).fill(null).map(() => Array(a.length + 1).fill(null));
+  // Maximum distance between matching characters
+  const matchDistance = Math.floor(Math.max(s1Norm.length, s2Norm.length) / 2) - 1;
 
-  for (let i = 0; i <= a.length; i++) matrix[0][i] = i;
-  for (let j = 0; j <= b.length; j++) matrix[j][0] = j;
+  // Find matching characters
+  const s1Matches: boolean[] = Array(s1Norm.length).fill(false);
+  const s2Matches: boolean[] = Array(s2Norm.length).fill(false);
+  let matches = 0;
 
-  for (let j = 1; j <= b.length; j++) {
-    for (let i = 1; i <= a.length; i++) {
-      const substitutionCost = a[i - 1] === b[j - 1] ? 0 : 1;
-      matrix[j][i] = Math.min(
-        matrix[j][i - 1] + 1,                   // deletion
-        matrix[j - 1][i] + 1,                   // insertion
-        matrix[j - 1][i - 1] + substitutionCost // substitution
-      );
+  for (let i = 0; i < s1Norm.length; i++) {
+    const start = Math.max(0, i - matchDistance);
+    const end = Math.min(i + matchDistance + 1, s2Norm.length);
+
+    for (let j = start; j < end; j++) {
+      if (!s2Matches[j] && s1Norm[i] === s2Norm[j]) {
+        s1Matches[i] = true;
+        s2Matches[j] = true;
+        matches++;
+        break;
+      }
     }
   }
 
-  return matrix[b.length][a.length];
+  if (matches === 0) return 0;
+
+  // Count transpositions
+  let transpositions = 0;
+  let k = 0;
+
+  for (let i = 0; i < s1Norm.length; i++) {
+    if (!s1Matches[i]) continue;
+    
+    while (!s2Matches[k]) k++;
+    
+    if (s1Norm[i] !== s2Norm[k]) transpositions++;
+    k++;
+  }
+
+  // Calculate Jaro similarity
+  const jaroSimilarity = (
+    matches / s1Norm.length +
+    matches / s2Norm.length +
+    (matches - transpositions / 2) / matches
+  ) / 3;
+
+  // Calculate common prefix length (up to 4 characters)
+  let commonPrefix = 0;
+  const maxPrefix = Math.min(4, Math.min(s1Norm.length, s2Norm.length));
+  for (let i = 0; i < maxPrefix; i++) {
+    if (s1Norm[i] === s2Norm[i]) commonPrefix++;
+    else break;
+  }
+
+  // Winkler modification: give more weight to strings with matching prefixes
+  const winklerModification = 0.1; // Standard scaling factor
+  return jaroSimilarity + (commonPrefix * winklerModification * (1 - jaroSimilarity));
 }
 
 export const searchService = new SearchService(); 
