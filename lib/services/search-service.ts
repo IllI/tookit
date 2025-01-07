@@ -707,7 +707,8 @@ ${html}[/INST]</s>`;
       const response = await hf.textGeneration({
         model: 'mistralai/Mistral-7B-Instruct-v0.2',
         inputs: prompt,
-        parameters: {
+        parameters: { 
+          max_new_tokens: 10000,
           temperature: 0.1,
           do_sample: false,
           stop: ["</s>", "[INST]"]
@@ -719,8 +720,9 @@ ${html}[/INST]</s>`;
         // Find the last occurrence of a JSON array (after the HTML)
         const lastJsonMatch = response.generated_text.split('</body></html>')[1]?.match(/\[\s*{[\s\S]*}\s*\]/);
         const cleanedResponse = lastJsonMatch ? lastJsonMatch[0].replace(/\\_/g, '_') : '[]';
-        console.log('Cleaned response:', cleanedResponse);
+        console.log('Cleaned response:', response.generated_text.split('</body></html>')[1]);
         const parsed = JSON.parse(cleanedResponse);
+       
         tickets = Array.isArray(parsed) ? parsed : [parsed];
 
         // Clean up and validate the data
