@@ -33,6 +33,23 @@ class WebReaderService {
     };
   }
 
+  private getErrorMessage(status: number, url: string): string {
+    const source = url.includes('vividseats.com') ? 'VividSeats' : 'StubHub';
+    
+    switch (status) {
+      case 524:
+        return `${source} is experiencing high traffic. Please try again in a few moments.`;
+      case 429:
+        return `Too many requests to ${source}. Please wait a moment and try again.`;
+      case 403:
+        return `Access to ${source} is currently restricted. Please try again later.`;
+      case 404:
+        return `The event page on ${source} could not be found. It may have been removed or sold out.`;
+      default:
+        return `Unable to fetch tickets from ${source}. Please try again later.`;
+    }
+  }
+
   async fetchPage(url: string, options: { headers?: Record<string, string> } = {}): Promise<string> {
     try {
       console.log('Fetching page:', url);
@@ -56,8 +73,8 @@ class WebReaderService {
       });
 
       if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`HTTP error! status: ${response.status}, details: ${errorText}`);
+        const userMessage = this.getErrorMessage(response.status, url);
+        throw new Error(userMessage);
       }
 
       const text = await response.text();
