@@ -688,8 +688,9 @@ ${html}[/INST]</s>`,
 - Extract row number/letter after "Row" text
 - Extract price as a number
 - Extract quantity from text like "1-6 tickets" or "2 tickets"
+- Extract ticket_url from the anchor tag href value
 - Use the data-testid attribute as listing_id
-Format: [{"section":"GA4","row":"G4","price":79,"quantity":1,"source":"vividseats","listing_id":"VB11556562645"}]
+Format: [{"section":"GA4","row":"G4","price":79,"quantity":1,"source":"vividseats","listing_id":"VB11556562645","ticket_url":"https://www.vividseats.com/poppy-tickets-chicago-house-of-blues-chicago-3-21-2025--concerts-pop/production/5369315?showDetails=VB11556562645"}]
 Return only JSON array.
 
 ${html}[/INST]</s>` :
@@ -720,7 +721,7 @@ ${html}[/INST]</s>`;
         // Find the last occurrence of a JSON array (after the HTML)
         const lastJsonMatch = response.generated_text.split('</body></html>')[1]?.match(/\[\s*{[\s\S]*}\s*\]/);
         const cleanedResponse = lastJsonMatch ? lastJsonMatch[0].replace(/\\_/g, '_') : '[]';
-        console.log('Cleaned response:', response.generated_text.split('</body></html>')[1]);
+        console.log('Cleaned response:', cleanedResponse);
         const parsed = JSON.parse(cleanedResponse);
        
         tickets = Array.isArray(parsed) ? parsed : [parsed];
@@ -733,9 +734,7 @@ ${html}[/INST]</s>`;
           quantity: parseInt(ticket.quantity?.toString() || '1'),
           source: ticket.source || source,
           listing_id: ticket.listing_id || crypto.randomUUID(),
-          ticket_url: source === 'vividseats' ? 
-            `https://www.vividseats.com/poppy-tickets-chicago-house-of-blues-chicago-3-21-2025--concerts-pop/production/5369315?showDetails=${ticket.listing_id}` : 
-            null,
+          ticket_url: ticket?.ticket_url ? ticket.ticket_url : null,
         })).filter(ticket => 
           ticket.price > 0 && 
           ticket.quantity > 0 && 
