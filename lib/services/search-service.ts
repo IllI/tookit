@@ -181,40 +181,57 @@ export class SearchService extends EventEmitter {
 
       if (deleteError) {
         console.error('Error deleting existing tickets:', deleteError);
-        throw deleteError;
+        // Continue processing even if delete fails
       }
 
       // Then insert new tickets in batches to avoid conflicts
       const batchSize = 50;
+      const savedTickets: any[] = [];
+      
       for (let i = 0; i < formattedTickets.length; i += batchSize) {
         const batch = formattedTickets.slice(i, i + batchSize);
-        const { error: insertError } = await this.supabase
-          .from('tickets')
-          .insert(batch);
+        try {
+          const { data, error: insertError } = await this.supabase
+            .from('tickets')
+            .upsert(batch, {
+              onConflict: 'event_id,section,row,price',
+              ignoreDuplicates: true
+            })
+            .select();
 
-        if (insertError) {
-          console.error('Database error saving tickets batch:', insertError);
-          throw insertError;
+          if (insertError) {
+            console.warn('Database warning saving tickets batch:', insertError);
+            // Continue processing other batches
+          }
+
+          if (data) {
+            savedTickets.push(...data);
+          }
+        } catch (error) {
+          console.warn(`Error saving batch ${i / batchSize + 1}:`, error);
+          // Continue with next batch
         }
       }
 
-      // Get all saved tickets
-      const { data, error: selectError } = await this.supabase
+      // Get all saved tickets for verification
+      const { data: verifiedTickets, error: selectError } = await this.supabase
         .from('tickets')
         .select()
         .eq('event_id', eventId)
         .eq('source', tickets[0]?.source);
 
       if (selectError) {
-        console.error('Error fetching saved tickets:', selectError);
-        throw selectError;
+        console.warn('Warning fetching saved tickets:', selectError);
       }
 
-      console.log('Successfully saved tickets to database:', data);
-      return data;
+      const successCount = verifiedTickets?.length || 0;
+      console.log(`Successfully saved ${successCount} out of ${tickets.length} tickets to database`);
+      
+      return verifiedTickets || [];
     } catch (error) {
-      console.error('Error saving tickets:', error);
-      throw error;
+      console.error('Error in saveTickets:', error);
+      // Return empty array but don't throw, allowing processing to continue
+      return [];
     }
   }
 
@@ -295,19 +312,28 @@ export class SearchService extends EventEmitter {
       this.emit('status', `Processing event page from ${source}...`);
       
       const html = await webReaderService.fetchPage(url);
-      const result = await this.parseEventPage(html, source);
+      const result = await this.parseEventPage(html, source, eventId);
       
       if (result?.tickets?.length) {
-        // Save to database first
-        await this.saveTickets(eventId, result.tickets);
-        console.log(`Saved ${result.tickets.length} tickets to database for event`);
+        try {
+          // Save to database first
+          const savedTickets = await this.saveTickets(eventId, result.tickets);
+          console.log(`Saved ${savedTickets.length} tickets to database for event`);
 
-        // Emit updated ticket list to frontend
-        await this.emitAllTickets(eventId);
+          // Emit updated ticket list to frontend even if some tickets failed to save
+          await this.emitAllTickets(eventId);
+        } catch (error) {
+          console.error(`Error saving/emitting tickets for ${source}:`, error);
+          // Still return the parsed tickets even if saving failed
+        }
       }
+
+      return result;
     } catch (error) {
       console.error(`Error in processEventPage for ${source}:`, error);
       this.emit('error', `Error processing ${source} event page: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      // Return empty result but don't throw
+      return { tickets: [] };
     }
   }
 
@@ -334,23 +360,22 @@ export class SearchService extends EventEmitter {
       if (existingEvents?.length) {
         this.emit('status', `Found ${existingEvents.length} existing events. Updating tickets...`);
         
-        for (const event of existingEvents) {
-          for (const link of event.event_links) {
+        // Process all events concurrently but wait for completion
+        await Promise.all(existingEvents.map(async event => {
+          const linkPromises = event.event_links.map(async (link: { source: string; url: string }) => {
             this.emit('status', `Updating tickets for ${event.name} from ${link.source}...`);
-            
-            const html = await webReaderService.fetchPage(link.url);
-            const result = await this.parseEventPage(html, link.source);
-            
-            if (result?.tickets) {
-              // Save tickets to database
-              await this.saveTickets(event.id, result.tickets);
-              // Emit updated ticket list to frontend
-              await this.emitAllTickets(event.id);
+            try {
+              await this.processEventPage(event.id, link.source, link.url);
+            } catch (error) {
+              // Log error but continue with other sources
+              console.error(`Error updating tickets from ${link.source}:`, error);
+              this.emit('status', error instanceof Error ? error.message : 'Error updating tickets');
             }
-          }
-        }
+          });
+          await Promise.all(linkPromises);
+        }));
 
-        // Get all tickets for these events
+        // Get all tickets for these events after processing is complete
         const { data: tickets } = await this.supabase
           .from('tickets')
           .select(`
@@ -382,10 +407,7 @@ export class SearchService extends EventEmitter {
 
         // Format tickets with event data for frontend
         const allTicketsWithEvent = tickets?.map((ticket: any) => {
-          // Find the event link for this ticket's source
           const eventLink = ticket.event.event_links?.find((link: any) => link.source === ticket.source);
-          
-          // Use ticket-specific URL if available, otherwise fall back to event URL
           const ticketUrl = ticket.ticket_url || (eventLink ? eventLink.url : null);
 
           return {
@@ -398,7 +420,7 @@ export class SearchService extends EventEmitter {
               state: ticket.event.state,
               country: ticket.event.country
             },
-            tickets: [], // This is needed for the EventData type but not used here
+            tickets: [],
             price: parseFloat(ticket.price.toString()),
             section: ticket.section,
             row: ticket.row || '',
@@ -421,7 +443,7 @@ export class SearchService extends EventEmitter {
       }
 
       // If no existing events, run new searches
-      this.emit('status', 'No existing events found. Starting new search...');
+      this.emit('status', 'Starting new search...');
       const results: { data: EventData[]; metadata: { sources: string[] } } = {
         data: [],
         metadata: { sources: [] }
@@ -432,28 +454,35 @@ export class SearchService extends EventEmitter {
         `${params.keyword} ${params.location}` : 
         params.keyword;
 
+      const maxRetries = 2;
+      const retryDelay = 2000;
+
+      const searchWithRetry = async (url: string, source: string) => {
+        for (let attempt = 0; attempt <= maxRetries; attempt++) {
+          try {
+            const result = await this.searchSite(url, source, params);
+            return result;
+          } catch (error) {
+            if (attempt === maxRetries) {
+              this.emit('status', error instanceof Error ? error.message : `Error searching ${source}`);
+              return [];
+            }
+            await new Promise(resolve => setTimeout(resolve, retryDelay));
+          }
+        }
+        return [];
+      };
+
       if (params.source === 'all' || params.source === 'stubhub') {
         const stubHubUrl = new URL('https://www.stubhub.com/secure/search');
         stubHubUrl.searchParams.set('q', searchQuery);
-        searches.push(
-          this.searchSite(stubHubUrl.toString(), 'stubhub', params)
-            .catch(error => {
-              this.emit('error', `StubHub search error: ${error.message}`);
-              return [];
-            })
-        );
+        searches.push(searchWithRetry(stubHubUrl.toString(), 'stubhub'));
       }
 
       if (params.source === 'all' || params.source === 'vividseats') {
         const vividSeatsUrl = new URL('https://www.vividseats.com/search');
         vividSeatsUrl.searchParams.set('searchTerm', searchQuery);
-        searches.push(
-          this.searchSite(vividSeatsUrl.toString(), 'vividseats', params)
-            .catch(error => {
-              this.emit('error', `VividSeats search error: ${error.message}`);
-              return [];
-            })
-        );
+        searches.push(searchWithRetry(vividSeatsUrl.toString(), 'vividseats'));
       }
 
       const searchResults = await Promise.all(searches);
@@ -462,17 +491,21 @@ export class SearchService extends EventEmitter {
 
       // Save new events and tickets to database
       if (results.data?.length) {
-        for (const event of results.data) {
+        // Process all events concurrently but wait for completion
+        await Promise.all(results.data.map(async event => {
           const existingEvent = await this.findMatchingEvent(event);
           let eventId;
 
           if (existingEvent) {
             eventId = existingEvent.id;
             await this.addEventLink(eventId, event.source!, event.url!);
-            // Immediately visit the event page after adding the link
-            await this.processEventPage(eventId, event.source!, event.url!);
+            try {
+              await this.processEventPage(eventId, event.source!, event.url!);
+            } catch (error) {
+              console.error(`Error processing event page:`, error);
+              this.emit('status', error instanceof Error ? error.message : 'Error processing event page');
+            }
           } else {
-            // Create new event
             const { data: newEvent } = await this.supabase
               .from('events')
               .insert({
@@ -490,18 +523,21 @@ export class SearchService extends EventEmitter {
             if (newEvent) {
               eventId = newEvent.id;
               await this.addEventLink(eventId, event.source!, event.url!);
-              // Immediately visit the event page after adding the link
-              await this.processEventPage(eventId, event.source!, event.url!);
+              try {
+                await this.processEventPage(eventId, event.source!, event.url!);
+              } catch (error) {
+                console.error(`Error processing event page:`, error);
+                this.emit('status', error instanceof Error ? error.message : 'Error processing event page');
+              }
             }
           }
 
-          // Save tickets if we have them
           if (eventId && event.tickets?.length) {
             await this.saveTickets(eventId, event.tickets);
           }
-        }
+        }));
 
-        // Now get all tickets for the final response
+        // Get all tickets after processing is complete
         const eventIds = await Promise.all(results.data.map(async event => {
           const existingEvent = await this.findMatchingEvent(event);
           return existingEvent?.id;
@@ -536,12 +572,8 @@ export class SearchService extends EventEmitter {
           .in('event_id', eventIds.filter(id => id))
           .order('price');
 
-        // Format tickets with event data for frontend
         const allTicketsWithEvent = tickets?.map((ticket: any) => {
-          // Find the event link for this ticket's source
           const eventLink = ticket.event.event_links?.find((link: any) => link.source === ticket.source);
-          
-          // Use ticket-specific URL if available, otherwise fall back to event URL
           const ticketUrl = ticket.ticket_url || (eventLink ? eventLink.url : null);
 
           return {
@@ -554,7 +586,7 @@ export class SearchService extends EventEmitter {
               state: ticket.event.state,
               country: ticket.event.country
             },
-            tickets: [], // This is needed for the EventData type but not used here
+            tickets: [],
             price: parseFloat(ticket.price.toString()),
             section: ticket.section,
             row: ticket.row || '',
@@ -584,7 +616,11 @@ export class SearchService extends EventEmitter {
 
     } catch (error) {
       console.error('Search error:', error);
-      throw error;
+      return {
+        success: false,
+        data: [],
+        metadata: { sources: [] }
+      };
     }
   }
 
@@ -690,7 +726,7 @@ ${html}[/INST]</s>`,
   ): Promise<TicketData[]> {
     try {
       // Get all listing containers
-      const listingContainers = $('.styles_listingsList__xLDbK .styles_listingRowContainer__d8WLZ');
+      const listingContainers = $('[data-testid="listings-container"] a');
       console.log(`Found ${listingContainers.length} listing containers in HTML`);
       
       const chunks: cheerio.Element[][] = [];
@@ -720,17 +756,20 @@ ${html}[/INST]</s>`,
       const allTickets: TicketData[] = [];
       const processedListingIds = new Set<string>();
 
-      // Process chunks sequentially to avoid database conflicts
-      for (let i = 0; i < chunks.length; i++) {
-        const chunk = chunks[i];
+      // Process each chunk asynchronously
+      const processChunk = async (chunk: cheerio.Element[], chunkIndex: number): Promise<TicketData[]> => {
         try {
-          const chunkHtml = chunk.map(el => $.html(el)).join('\n');
-          console.log(`Processing chunk ${i + 1}, tickets ${i * chunkSize + 1}-${Math.min((i + 1) * chunkSize, listingContainers.length)}`);
+          // Wrap each ticket element in a div with a data attribute for better parsing
+          const wrappedHtml = chunk.map((el, i) => {
+            const ticketHtml = $.html(el);
+            return `<div data-ticket-index="${chunkIndex * chunkSize + i}">${ticketHtml}</div>`;
+          }).join('\n');
+
+          console.log(`Processing chunk ${chunkIndex + 1}, tickets ${chunkIndex * chunkSize + 1}-${Math.min((chunkIndex + 1) * chunkSize, listingContainers.length)}`);
 
           const response = await hf.textGeneration({
             model: 'mistralai/Mistral-7B-Instruct-v0.2',
-            inputs: `<s>[INST]You are a data extraction tool. Do not write code or explain anything. Only output a JSON array containing ticket data from this HTML.
-Each ticket should have:
+            inputs: `<s>[INST]Extract ticket listings from HTML. Each ticket is wrapped in a div. For each ticket extract:
 - section: The section name (e.g. "GA Main Floor", "GA Balcony", "GA4")
 - row: The row number/letter (e.g. "G4", "12", "GA")
 - price: The numeric price value
@@ -743,7 +782,7 @@ Example output:
 [{"section":"GA4","row":"G4","price":79,"quantity":1,"source":"vividseats","listing_id":"VB11556562645","ticket_url":"https://www.vividseats.com/poppy-tickets-chicago-house-of-blues-chicago-3-21-2025--concerts-pop/production/5369315?showDetails=VB11556562645"}]
 
 HTML to extract from:
-${chunkHtml}[/INST]</s>`,
+${wrappedHtml}[/INST]</s>`,
             parameters: {
               max_new_tokens: 4000,
               temperature: 0.1,
@@ -754,8 +793,8 @@ ${chunkHtml}[/INST]</s>`,
 
           const responseText = response.generated_text.split('[/INST]</s>')[1];
           if (!responseText) {
-            console.log(`No response text found after [/INST]</s> in chunk ${i + 1}`);
-            continue;
+            console.log(`No response text found after [/INST]</s> in chunk ${chunkIndex + 1}`);
+            return [];
           }
 
           const cleanedResponse = responseText
@@ -778,7 +817,7 @@ ${chunkHtml}[/INST]</s>`,
               try {
                 chunkTickets = JSON.parse(`[${objectMatches.join(',')}]`);
               } catch (e) {
-                console.error(`Error parsing individual tickets from chunk ${i + 1}:`, e);
+                console.error(`Error parsing individual tickets from chunk ${chunkIndex + 1}:`, e);
               }
             }
           } else {
@@ -786,7 +825,7 @@ ${chunkHtml}[/INST]</s>`,
               const parsed = JSON.parse(jsonMatch[0]);
               chunkTickets = Array.isArray(parsed) ? parsed : [parsed];
             } catch (error) {
-              console.error(`Error parsing JSON from chunk ${i + 1}:`, error);
+              console.error(`Error parsing JSON from chunk ${chunkIndex + 1}:`, error);
             }
           }
 
@@ -800,22 +839,33 @@ ${chunkHtml}[/INST]</s>`,
           });
 
           if (uniqueTickets.length > 0) {
-            allTickets.push(...uniqueTickets);
+            console.log(`Found ${uniqueTickets.length} tickets in chunk ${chunkIndex + 1}`);
             
-            // Save this chunk's tickets if we have an eventId
+            // Save tickets to database and update frontend immediately if we have an eventId
             if (eventId) {
               try {
                 await this.saveTickets(eventId, uniqueTickets);
                 await this.emitAllTickets(eventId);
               } catch (error) {
-                console.error(`Error saving tickets from chunk ${i + 1}:`, error);
+                console.error(`Error saving tickets from chunk ${chunkIndex + 1}:`, error);
               }
             }
+
+            allTickets.push(...uniqueTickets);
           }
+
+          return uniqueTickets;
         } catch (error) {
-          console.error(`Error processing chunk ${i + 1}:`, error);
+          console.error(`Error processing chunk ${chunkIndex + 1}:`, error);
+          return [];
         }
-      }
+      };
+
+      // Process all chunks concurrently
+      const chunkPromises = chunks.map((chunk, index) => processChunk(chunk, index));
+
+      // Wait for all chunks to complete
+      await Promise.all(chunkPromises);
 
       console.log(`Total unique tickets found: ${processedListingIds.size}`);
       return allTickets;
@@ -832,10 +882,10 @@ ${chunkHtml}[/INST]</s>`,
       const TOKEN_LIMIT = 32000;
 
       if (source === 'vividseats' && estimatedTokens > TOKEN_LIMIT) {
-        // For large VividSeats HTML, process in chunks
+        // For large VividSeats HTML, pro cess in chunks
         console.log('VividSeats HTML exceeds token limit, processing in chunks');
         const $ = cheerio.load(html);
-        const ticketElements = $('a');
+        const ticketElements = $('[data-testid="listings-container"]');
         const elementArray = ticketElements.toArray();
         const CHUNK_SIZE = 10;
 
@@ -846,25 +896,34 @@ ${chunkHtml}[/INST]</s>`,
 
       // Use existing logic for small HTML or non-VividSeats sources
       const prompt = source === 'vividseats' ?
-        `<s>[INST]Extract ticket listings from HTML as JSON array. For VividSeats listings:
-- Extract section name (e.g. "GA Main Floor", "GA Balcony", "GA4")
-- Extract row number/letter after "Row" text
-- Extract price as a number
-- Extract quantity from text like "1-6 tickets" or "2 tickets"
-- Extract ticket_url from the anchor tag href value
-- Use the data-testid attribute as listing_id
-Format: [{"section":"GA4","row":"G4","price":79,"quantity":1,"source":"vividseats","listing_id":"VB11556562645","ticket_url":"https://www.vividseats.com/poppy-tickets-chicago-house-of-blues-chicago-3-21-2025--concerts-pop/production/5369315?showDetails=VB11556562645"}]
-Return only JSON array.
+        `<s>[INST]Extract ticket listings from HTML as JSON array. Each ticket should be a JSON object with these fields:
+- section: The section name (e.g. "GA", "Floor", "Balcony")
+- row: The row number/letter (use "GA" for general admission)
+- price: The numeric price value (e.g. 192)
+- quantity: The number of tickets (e.g. "2" or range like "1-8")
+- source: Always "vividseats"
+- listing_id: The data-testid attribute value
+- ticket_url: The href attribute from the anchor tag
+
+Example output:
+[{"section":"GA","row":"GA","price":192,"quantity":"1-8","source":"vividseats","listing_id":"VB11572186950","ticket_url":"https://www.vividseats.com/..."}]
+
+Return only the JSON array, no explanations.
 
 ${html}[/INST]</s>` :
-        `<s>[INST]Extract ticket listings from HTML as JSON array. For StubHub listings:
-- Extract section from the section name text (e.g. "Floor GA", "GA Standing", etc)
-- Extract row from the row text if available (e.g. "Row GA1", "GA", etc)
-- Extract price as a number (e.g. 123.45)
-- Extract quantity from text like "2 tickets available"
-- Use the data-listing-id or similar attribute as listing_id
-Format: [{"section":"Floor GA","row":"GA1","price":123.45,"quantity":2,"source":"stubhub","listing_id":"123456"}]
-Return only JSON array.
+        `<s>[INST]Extract ticket listings from HTML as JSON array. Each ticket should be a JSON object with these fields:
+- section: The section name (e.g. "Floor GA", "GA Standing")
+- row: The row number/letter (use "GA" for general admission)
+- price: The numeric price value (e.g. 123.45)
+- quantity: The number of tickets (e.g. "2" or range like "1-4")
+- source: Always "stubhub"
+- listing_id: The data-listing-id attribute value
+- ticket_url: The href attribute from the anchor tag
+
+Example output:
+[{"section":"Floor GA","row":"GA","price":123.45,"quantity":"2","source":"stubhub","listing_id":"123456","ticket_url":"https://www.stubhub.com/..."}]
+
+Return only the JSON array, no explanations.
 
 ${html}[/INST]</s>`;
 
@@ -885,77 +944,81 @@ ${html}[/INST]</s>`;
         const responseText = response.generated_text.split('[/INST]</s>')[1];
         console.log('Raw response text:', responseText);
 
-        // Try to parse the response based on source
-        let parsed;
-        if (source === 'stubhub') {
-          // StubHub format: [["section": "value", ...], [...]]
-          // First clean up any escaped characters and normalize the format
-          const cleanedResponse = responseText
-            .replace(/\\_/g, '_')                             // Fix escaped underscores first
-            .replace(/\\\\/g, '\\')                           // Fix double escaped backslashes
-            .replace(/\\"/g, '"')                            // Fix escaped quotes
-            .replace(/\\n/g, ' ')                            // Replace newlines with spaces
-            .replace(/\\t/g, ' ')                            // Replace tabs with spaces
-            .replace(/\[\s*\[/g, '[{')                       // Convert [[ to [{
-            .replace(/\]\s*\]/g, '}]')                       // Convert ]] to }]
-            .replace(/"\s*:\s*"/g, '":"')                    // Normalize "key":"value"
-            .replace(/"\s*:\s*(\d+)/g, '":$1')              // Normalize "key":number
-            .replace(/,\s*}/g, '}')                         // Remove trailing commas
-            .replace(/,\s*]/g, ']')                         // Remove trailing commas in arrays
-            .replace(/[^\x20-\x7E]/g, '')                   // Remove non-printable characters
-            .trim();
-          
-          console.log('Cleaned StubHub response:', cleanedResponse);
-          try {
-            parsed = JSON.parse(cleanedResponse);
-          } catch (e) {
-            console.error('JSON parse error:', e);
-            console.error('Failed to parse string:', cleanedResponse);
-            throw e;
-          }
-        } else {
-          // VividSeats format
-          // First clean up any escaped characters
-          const cleanedResponse = responseText
-            .replace(/\\\\/g, '\\')                           // Fix double escaped backslashes
-            .replace(/\\"/g, '"')                            // Fix escaped quotes
-            .replace(/\\n/g, ' ')                            // Replace newlines with spaces
-            .replace(/\\t/g, ' ')                            // Replace tabs with spaces
-            .replace(/\\_/g, '_')                            // Fix escaped underscores
-            .replace(/[^\x20-\x7E]/g, '')                    // Remove non-printable characters
-            .trim();
-            
-          // Then find and parse the JSON array
-          const jsonMatch = cleanedResponse.match(/\[\s*{[\s\S]*?}\s*\]/);
-          if (!jsonMatch) {
-            console.log('No JSON array found in response');
+        // Clean up the response text
+        const cleanedResponse = responseText
+          .replace(/\[\s*\[/g, '[{')           // Convert [[ to [{
+          .replace(/\]\s*\]/g, '}]')           // Convert ]] to }]
+          .replace(/\\\\/g, '\\')              // Fix escaped backslashes
+          .replace(/\\"/g, '"')                // Fix escaped quotes
+          .replace(/\\n/g, ' ')                // Replace newlines
+          .replace(/\\t/g, ' ')                // Replace tabs
+          .replace(/\\_/g, '_')                // Fix escaped underscores
+          .replace(/[^\x20-\x7E]/g, '')        // Remove non-printable chars
+          .trim();
+
+        // Try to find a valid JSON array in the cleaned response
+        const jsonMatch = cleanedResponse.match(/\[\s*\{[\s\S]*?\}\s*\]/);
+        if (!jsonMatch) {
+          // If no object format found, try array format
+          const arrayMatch = cleanedResponse.match(/\[\s*\[[\s\S]*?\]\s*\]/);
+          if (arrayMatch) {
+            // Convert array format to object format
+            const arrayData = JSON.parse(arrayMatch[0]);
+            if (Array.isArray(arrayData) && arrayData.length > 0 && Array.isArray(arrayData[0])) {
+              const objectData = arrayData.map(([section, row, price, quantity, listing_id, ticket_url]) => ({
+                section,
+                row,
+                price,
+                quantity,
+                source: source,
+                listing_id,
+                ticket_url
+              }));
+              tickets = objectData;
+            } else {
+              console.log('Invalid array format in response');
+              return { tickets: [] };
+            }
+          } else {
+            console.log('No valid JSON found in response');
             return { tickets: [] };
           }
-          
-          console.log('VividSeats JSON:', jsonMatch[0]);
+        } else {
           try {
-            parsed = JSON.parse(jsonMatch[0]);
+            const parsed = JSON.parse(jsonMatch[0]);
+            tickets = Array.isArray(parsed) ? parsed : [parsed];
           } catch (e) {
             console.error('JSON parse error:', e);
             console.error('Failed to parse string:', jsonMatch[0]);
-            throw e;
+            return { tickets: [] };
           }
         }
 
-        tickets = Array.isArray(parsed) ? parsed : [parsed];
-
         // Clean up and validate the data
-        tickets = tickets.map(ticket => ({
-          section: ticket.section || 'General Admission',
-          row: ticket.row?.replace(/^Row\s+/i, '') || '',  // Remove 'Row ' prefix if present
-          price: parseFloat(ticket.price?.toString() || '0'),
-          quantity: parseInt(ticket.quantity?.toString() || '1'),
-          source: ticket.source || source,
-          listing_id: ticket.listing_id || crypto.randomUUID(),
-          ticket_url: ticket?.ticket_url ? ticket.ticket_url : null,
-        })).filter(ticket => 
+        tickets = tickets.map(ticket => {
+          // Convert quantity string to number (take the first number in a range)
+          const quantityStr = ticket.quantity?.toString() || '1';
+          const quantity = parseInt(quantityStr.split('-')[0]);
+
+          // Clean up ticket URL if it's a relative path
+          let ticketUrl = ticket.ticket_url || null;
+          if (ticketUrl && !ticketUrl.startsWith('http')) {
+            ticketUrl = source === 'vividseats' 
+              ? `https://www.vividseats.com${ticketUrl}`
+              : `https://www.stubhub.com${ticketUrl}`;
+          }
+
+          return {
+            section: ticket.section || 'General Admission',
+            row: ticket.row === 'NA' ? 'GA' : ticket.row || 'GA',
+            price: parseFloat(ticket.price?.toString() || '0'),
+            quantity: quantity,
+            source: ticket.source || source,
+            listing_id: ticket.listing_id || crypto.randomUUID(),
+            ticket_url: ticketUrl
+          };
+        }).filter(ticket => 
           ticket.price > 0 && 
-          ticket.quantity > 0 && 
           ticket.section.length > 0
         );
 
