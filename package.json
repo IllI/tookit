@@ -3,9 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "preinstall": "cross-env PUPPETEER_SKIP_DOWNLOAD=true",
-    "dev": "cross-env NODE_OPTIONS='--trace-warnings' next dev",
-    "build": "cross-env NODE_OPTIONS='--max_old_space_size=4096' next build",
+    "dev": "next dev",
+    "build": "next build",
     "start": "next start",
     "lint": "next lint"
   },
@@ -14,7 +13,6 @@
     "@supabase/supabase-js": "^2.39.0",
     "cheerio": "^1.0.0-rc.12",
     "chromium": "3.0.3",
-    "cross-env": "^7.0.3",
     "dotenv": "^16.3.1",
     "next": "14.0.4",
     "puppeteer-core": "^22.0.0",
@@ -32,6 +30,7 @@
     "@types/react-dom": "18.3.5",
     "@types/user-agents": "^1.0.4",
     "autoprefixer": "^10.0.1",
+    "cross-env": "^7.0.3",
     "eslint": "^8",
     "eslint-config-next": "14.0.4",
     "postcss": "^8",
