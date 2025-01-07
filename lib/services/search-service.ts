@@ -611,6 +611,8 @@ ${html}[/INST]</s>`,
           }
         });
 
+        console.log(`Chunk response:`, response.generated_text);
+
         let eventsData: any[];
         try {
           // Find the last occurrence of a JSON array (after the HTML)
@@ -700,25 +702,47 @@ ${html}[/INST]</s>`,
 
       console.log(`Processing ${listingContainers.length} tickets in ${chunks.length} chunks`);
 
-      // Process all chunks in parallel
-      const chunkPromises = chunks.map(async (chunk, index) => {
+      // If we have an eventId, first delete existing tickets for this source
+      if (eventId) {
+        console.log('Deleting existing tickets for event before processing new ones');
+        const { error: deleteError } = await this.supabase
+          .from('tickets')
+          .delete()
+          .eq('event_id', eventId)
+          .eq('source', 'vividseats');
+
+        if (deleteError) {
+          console.error('Error deleting existing tickets:', deleteError);
+          throw deleteError;
+        }
+      }
+
+      const allTickets: TicketData[] = [];
+      const processedListingIds = new Set<string>();
+
+      // Process chunks sequentially to avoid database conflicts
+      for (let i = 0; i < chunks.length; i++) {
+        const chunk = chunks[i];
         try {
           const chunkHtml = chunk.map(el => $.html(el)).join('\n');
-          console.log(`Processing chunk ${index + 1}, tickets ${index * chunkSize + 1}-${Math.min((index + 1) * chunkSize, listingContainers.length)}`);
-          console.log(`Chunk ${index + 1} HTML sample (first 200 chars):`, chunkHtml.substring(0, 200));
+          console.log(`Processing chunk ${i + 1}, tickets ${i * chunkSize + 1}-${Math.min((i + 1) * chunkSize, listingContainers.length)}`);
 
           const response = await hf.textGeneration({
             model: 'mistralai/Mistral-7B-Instruct-v0.2',
-            inputs: `<s>[INST]Extract ticket listings from HTML as JSON array. For VividSeats listings:
-- Extract section name (e.g. "GA Main Floor", "GA Balcony", "GA4")
-- Extract row number/letter after "Row" text
-- Extract price as a number
-- Extract quantity from text like "1-6 tickets" or "2 tickets"
-- Extract ticket_url from the anchor tag href value
-- Use the data-testid attribute as listing_id
-Format: [{"section":"GA4","row":"G4","price":79,"quantity":1,"source":"vividseats","listing_id":"VB11556562645","ticket_url":"https://www.vividseats.com/poppy-tickets-chicago-house-of-blues-chicago-3-21-2025--concerts-pop/production/5369315?showDetails=VB11556562645"}]
-Return only JSON array.
+            inputs: `<s>[INST]You are a data extraction tool. Do not write code or explain anything. Only output a JSON array containing ticket data from this HTML.
+Each ticket should have:
+- section: The section name (e.g. "GA Main Floor", "GA Balcony", "GA4")
+- row: The row number/letter (e.g. "G4", "12", "GA")
+- price: The numeric price value
+- quantity: The number of tickets available
+- source: Always "vividseats"
+- listing_id: The data-testid attribute value
+- ticket_url: The href attribute from the anchor tag
 
+Example output:
+[{"section":"GA4","row":"G4","price":79,"quantity":1,"source":"vividseats","listing_id":"VB11556562645","ticket_url":"https://www.vividseats.com/poppy-tickets-chicago-house-of-blues-chicago-3-21-2025--concerts-pop/production/5369315?showDetails=VB11556562645"}]
+
+HTML to extract from:
 ${chunkHtml}[/INST]</s>`,
             parameters: {
               max_new_tokens: 4000,
@@ -728,12 +752,10 @@ ${chunkHtml}[/INST]</s>`,
             }
           });
 
-          console.log(`Chunk ${index + 1} raw response length:`, response.generated_text.length);
-
           const responseText = response.generated_text.split('[/INST]</s>')[1];
           if (!responseText) {
-            console.log(`No response text found after [/INST]</s> in chunk ${index + 1}`);
-            return [];
+            console.log(`No response text found after [/INST]</s> in chunk ${i + 1}`);
+            continue;
           }
 
           const cleanedResponse = responseText
@@ -745,55 +767,57 @@ ${chunkHtml}[/INST]</s>`,
             .replace(/[^\x20-\x7E]/g, '')
             .trim();
 
-          console.log(`Chunk ${index + 1} cleaned response length:`, cleanedResponse.length);
-
           // Try to find the last complete JSON object if response was truncated
           const jsonMatch = cleanedResponse.match(/\[\s*{[\s\S]*?}\s*\]/);
+          let chunkTickets: TicketData[] = [];
+
           if (!jsonMatch) {
             // Try to find any complete JSON objects in the response
             const objectMatches = cleanedResponse.match(/{\s*"section"[\s\S]*?}/g);
             if (objectMatches) {
-              console.log(`Found ${objectMatches.length} complete ticket objects in chunk ${index + 1}`);
               try {
-                const tickets = JSON.parse(`[${objectMatches.join(',')}]`);
-                console.log(`Successfully parsed ${tickets.length} tickets from chunk ${index + 1}`);
-                return tickets;
+                chunkTickets = JSON.parse(`[${objectMatches.join(',')}]`);
               } catch (e) {
-                console.error(`Error parsing individual tickets from chunk ${index + 1}:`, e);
-                return [];
+                console.error(`Error parsing individual tickets from chunk ${i + 1}:`, e);
               }
             }
-            console.log(`No JSON array or complete objects found in chunk ${index + 1} response`);
-            return [];
+          } else {
+            try {
+              const parsed = JSON.parse(jsonMatch[0]);
+              chunkTickets = Array.isArray(parsed) ? parsed : [parsed];
+            } catch (error) {
+              console.error(`Error parsing JSON from chunk ${i + 1}:`, error);
+            }
           }
 
-          try {
-            const parsed = JSON.parse(jsonMatch[0]);
-            const tickets = Array.isArray(parsed) ? parsed : [parsed];
-            console.log(`Successfully parsed ${tickets.length} tickets from chunk ${index + 1}`);
-            return tickets;
-          } catch (error) {
-            console.error(`Error parsing JSON from chunk ${index + 1}:`, error);
-            return [];
+          // Filter out duplicates by listing_id
+          const uniqueTickets = chunkTickets.filter(ticket => {
+            if (!ticket.listing_id || processedListingIds.has(ticket.listing_id)) {
+              return false;
+            }
+            processedListingIds.add(ticket.listing_id);
+            return true;
+          });
+
+          if (uniqueTickets.length > 0) {
+            allTickets.push(...uniqueTickets);
+            
+            // Save this chunk's tickets if we have an eventId
+            if (eventId) {
+              try {
+                await this.saveTickets(eventId, uniqueTickets);
+                await this.emitAllTickets(eventId);
+              } catch (error) {
+                console.error(`Error saving tickets from chunk ${i + 1}:`, error);
+              }
+            }
           }
         } catch (error) {
-          console.error(`Error processing chunk ${index + 1}:`, error);
-          return [];
+          console.error(`Error processing chunk ${i + 1}:`, error);
         }
-      });
-
-      // Wait for all chunks to complete and combine results
-      const chunkResults = await Promise.all(chunkPromises);
-      const allTickets = chunkResults.flat();
-      console.log(`Total tickets found across all chunks: ${allTickets.length}`);
-
-      // Save tickets if we have an eventId
-      if (eventId && allTickets.length > 0) {
-        console.log(`Saving ${allTickets.length} tickets to database`);
-        await this.saveTickets(eventId, allTickets);
-        await this.emitAllTickets(eventId);
       }
 
+      console.log(`Total unique tickets found: ${processedListingIds.size}`);
       return allTickets;
     } catch (error) {
       console.error('Error in processVividSeatsChunks:', error);
