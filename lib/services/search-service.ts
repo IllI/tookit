@@ -718,12 +718,67 @@ ${html}[/INST]</s>`;
 
       let tickets: TicketData[];
       try {
-        // Find the last occurrence of a JSON array (after the HTML)
-        const lastJsonMatch = response.generated_text.split('</body></html>')[1]?.match(/\[\s*{[\s\S]*}\s*\]/);
-        const cleanedResponse = lastJsonMatch ? lastJsonMatch[0].replace(/\\_/g, '_') : '[]';
-        console.log('Cleaned response:', cleanedResponse);
-        const parsed = JSON.parse(cleanedResponse);
-       
+        // Extract JSON array from response
+        const responseText = response.generated_text.split('[/INST]</s>')[1];
+        console.log('Raw response text:', responseText);
+
+        // Try to parse the response based on source
+        let parsed;
+        if (source === 'stubhub') {
+          // StubHub format: [["section": "value", ...], [...]]
+          // First clean up any escaped characters and normalize the format
+          const cleanedResponse = responseText
+            .replace(/\\_/g, '_')                             // Fix escaped underscores first
+            .replace(/\\\\/g, '\\')                           // Fix double escaped backslashes
+            .replace(/\\"/g, '"')                            // Fix escaped quotes
+            .replace(/\\n/g, ' ')                            // Replace newlines with spaces
+            .replace(/\\t/g, ' ')                            // Replace tabs with spaces
+            .replace(/\[\s*\[/g, '[{')                       // Convert [[ to [{
+            .replace(/\]\s*\]/g, '}]')                       // Convert ]] to }]
+            .replace(/"\s*:\s*"/g, '":"')                    // Normalize "key":"value"
+            .replace(/"\s*:\s*(\d+)/g, '":$1')              // Normalize "key":number
+            .replace(/,\s*}/g, '}')                         // Remove trailing commas
+            .replace(/,\s*]/g, ']')                         // Remove trailing commas in arrays
+            .replace(/[^\x20-\x7E]/g, '')                   // Remove non-printable characters
+            .trim();
+          
+          console.log('Cleaned StubHub response:', cleanedResponse);
+          try {
+            parsed = JSON.parse(cleanedResponse);
+          } catch (e) {
+            console.error('JSON parse error:', e);
+            console.error('Failed to parse string:', cleanedResponse);
+            throw e;
+          }
+        } else {
+          // VividSeats format
+          // First clean up any escaped characters
+          const cleanedResponse = responseText
+            .replace(/\\\\/g, '\\')                           // Fix double escaped backslashes
+            .replace(/\\"/g, '"')                            // Fix escaped quotes
+            .replace(/\\n/g, ' ')                            // Replace newlines with spaces
+            .replace(/\\t/g, ' ')                            // Replace tabs with spaces
+            .replace(/\\_/g, '_')                            // Fix escaped underscores
+            .replace(/[^\x20-\x7E]/g, '')                    // Remove non-printable characters
+            .trim();
+            
+          // Then find and parse the JSON array
+          const jsonMatch = cleanedResponse.match(/\[\s*{[\s\S]*?}\s*\]/);
+          if (!jsonMatch) {
+            console.log('No JSON array found in response');
+            return { tickets: [] };
+          }
+          
+          console.log('VividSeats JSON:', jsonMatch[0]);
+          try {
+            parsed = JSON.parse(jsonMatch[0]);
+          } catch (e) {
+            console.error('JSON parse error:', e);
+            console.error('Failed to parse string:', jsonMatch[0]);
+            throw e;
+          }
+        }
+
         tickets = Array.isArray(parsed) ? parsed : [parsed];
 
         // Clean up and validate the data
