@@ -679,9 +679,148 @@ ${html}[/INST]</s>`,
     }
   }
 
-  private async parseEventPage(html: string, source: string) {
+  private async processVividSeatsChunks(
+    $: cheerio.Root,
+    elementArray: cheerio.Element[],
+    startIndex: number,
+    chunkSize: number,
+    eventId?: string
+  ): Promise<TicketData[]> {
     try {
-      // Use source-specific prompts to handle different HTML structures
+      // Get all listing containers
+      const listingContainers = $('.styles_listingsList__xLDbK .styles_listingRowContainer__d8WLZ');
+      console.log(`Found ${listingContainers.length} listing containers in HTML`);
+      
+      const chunks: cheerio.Element[][] = [];
+      
+      // Split into chunks
+      for (let i = 0; i < listingContainers.length; i += chunkSize) {
+        chunks.push(listingContainers.slice(i, i + chunkSize).toArray());
+      }
+
+      console.log(`Processing ${listingContainers.length} tickets in ${chunks.length} chunks`);
+
+      // Process all chunks in parallel
+      const chunkPromises = chunks.map(async (chunk, index) => {
+        try {
+          const chunkHtml = chunk.map(el => $.html(el)).join('\n');
+          console.log(`Processing chunk ${index + 1}, tickets ${index * chunkSize + 1}-${Math.min((index + 1) * chunkSize, listingContainers.length)}`);
+          console.log(`Chunk ${index + 1} HTML sample (first 200 chars):`, chunkHtml.substring(0, 200));
+
+          const response = await hf.textGeneration({
+            model: 'mistralai/Mistral-7B-Instruct-v0.2',
+            inputs: `<s>[INST]Extract ticket listings from HTML as JSON array. For VividSeats listings:
+- Extract section name (e.g. "GA Main Floor", "GA Balcony", "GA4")
+- Extract row number/letter after "Row" text
+- Extract price as a number
+- Extract quantity from text like "1-6 tickets" or "2 tickets"
+- Extract ticket_url from the anchor tag href value
+- Use the data-testid attribute as listing_id
+Format: [{"section":"GA4","row":"G4","price":79,"quantity":1,"source":"vividseats","listing_id":"VB11556562645","ticket_url":"https://www.vividseats.com/poppy-tickets-chicago-house-of-blues-chicago-3-21-2025--concerts-pop/production/5369315?showDetails=VB11556562645"}]
+Return only JSON array.
+
+${chunkHtml}[/INST]</s>`,
+            parameters: {
+              max_new_tokens: 4000,
+              temperature: 0.1,
+              do_sample: false,
+              stop: ["</s>", "[INST]"]
+            }
+          });
+
+          console.log(`Chunk ${index + 1} raw response length:`, response.generated_text.length);
+
+          const responseText = response.generated_text.split('[/INST]</s>')[1];
+          if (!responseText) {
+            console.log(`No response text found after [/INST]</s> in chunk ${index + 1}`);
+            return [];
+          }
+
+          const cleanedResponse = responseText
+            .replace(/\\\\/g, '\\')
+            .replace(/\\"/g, '"')
+            .replace(/\\n/g, ' ')
+            .replace(/\\t/g, ' ')
+            .replace(/\\_/g, '_')
+            .replace(/[^\x20-\x7E]/g, '')
+            .trim();
+
+          console.log(`Chunk ${index + 1} cleaned response length:`, cleanedResponse.length);
+
+          // Try to find the last complete JSON object if response was truncated
+          const jsonMatch = cleanedResponse.match(/\[\s*{[\s\S]*?}\s*\]/);
+          if (!jsonMatch) {
+            // Try to find any complete JSON objects in the response
+            const objectMatches = cleanedResponse.match(/{\s*"section"[\s\S]*?}/g);
+            if (objectMatches) {
+              console.log(`Found ${objectMatches.length} complete ticket objects in chunk ${index + 1}`);
+              try {
+                const tickets = JSON.parse(`[${objectMatches.join(',')}]`);
+                console.log(`Successfully parsed ${tickets.length} tickets from chunk ${index + 1}`);
+                return tickets;
+              } catch (e) {
+                console.error(`Error parsing individual tickets from chunk ${index + 1}:`, e);
+                return [];
+              }
+            }
+            console.log(`No JSON array or complete objects found in chunk ${index + 1} response`);
+            return [];
+          }
+
+          try {
+            const parsed = JSON.parse(jsonMatch[0]);
+            const tickets = Array.isArray(parsed) ? parsed : [parsed];
+            console.log(`Successfully parsed ${tickets.length} tickets from chunk ${index + 1}`);
+            return tickets;
+          } catch (error) {
+            console.error(`Error parsing JSON from chunk ${index + 1}:`, error);
+            return [];
+          }
+        } catch (error) {
+          console.error(`Error processing chunk ${index + 1}:`, error);
+          return [];
+        }
+      });
+
+      // Wait for all chunks to complete and combine results
+      const chunkResults = await Promise.all(chunkPromises);
+      const allTickets = chunkResults.flat();
+      console.log(`Total tickets found across all chunks: ${allTickets.length}`);
+
+      // Save tickets if we have an eventId
+      if (eventId && allTickets.length > 0) {
+        console.log(`Saving ${allTickets.length} tickets to database`);
+        await this.saveTickets(eventId, allTickets);
+        await this.emitAllTickets(eventId);
+      }
+
+      return allTickets;
+    } catch (error) {
+      console.error('Error in processVividSeatsChunks:', error);
+      return [];
+    }
+  }
+
+  private async parseEventPage(html: string, source: string, eventId?: string) {
+    try {
+      // First check if HTML is small enough to process in one go
+      const estimatedTokens = html.length / 4;
+      const TOKEN_LIMIT = 32000;
+
+      if (source === 'vividseats' && estimatedTokens > TOKEN_LIMIT) {
+        // For large VividSeats HTML, process in chunks
+        console.log('VividSeats HTML exceeds token limit, processing in chunks');
+        const $ = cheerio.load(html);
+        const ticketElements = $('a');
+        const elementArray = ticketElements.toArray();
+        const CHUNK_SIZE = 10;
+
+        console.log(`Processing ${elementArray.length} tickets in chunks of ${CHUNK_SIZE}`);
+        const tickets = await this.processVividSeatsChunks($, elementArray, 0, CHUNK_SIZE, eventId);
+        return { tickets };
+      }
+
+      // Use existing logic for small HTML or non-VividSeats sources
       const prompt = source === 'vividseats' ?
         `<s>[INST]Extract ticket listings from HTML as JSON array. For VividSeats listings:
 - Extract section name (e.g. "GA Main Floor", "GA Balcony", "GA4")
