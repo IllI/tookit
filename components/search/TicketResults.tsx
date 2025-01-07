@@ -1,15 +1,41 @@
 import { SearchResult } from '@/lib/types/api';
 
+interface Ticket {
+  id: string;
+  name: string;
+  date: string;
+  venue: string;
+  location: {
+    city: string;
+    state: string;
+    country: string;
+  };
+  section: string;
+  row?: string;
+  price: number;
+  quantity: number;
+  source: string;
+  ticket_url?: string;
+}
+
 interface TicketResultsProps {
-  results: SearchResult;
+  results: {
+    success: boolean;
+    data: Ticket[];
+    metadata: { sources: string[] };
+  };
   isLoading: boolean;
   lastUpdated: Date;
 }
 
 export default function TicketResults({ results, isLoading, lastUpdated }: TicketResultsProps) {
   const formatDate = (dateString: string) => {
+    if (!dateString) return 'Date TBD';
+    
     try {
       const date = new Date(dateString);
+      if (isNaN(date.getTime())) return 'Date TBD';
+      
       return date.toLocaleDateString('en-US', {
         weekday: 'long',
         year: 'numeric',
@@ -34,35 +60,6 @@ export default function TicketResults({ results, isLoading, lastUpdated }: Ticke
     }
   };
 
-  const getTicketUrl = (ticket: any) => {
-    // Get the event URL from the event object
-    const eventUrl = ticket.event?.url;
-    if (!eventUrl) {
-      console.warn('No event URL found for ticket:', ticket);
-      return '#';
-    }
-
-    try {
-      const url = new URL(eventUrl);
-      
-      // Add source-specific parameters
-      if (ticket.source === 'stubhub') {
-        url.searchParams.set('quantity', String(ticket.quantity || 1));
-        if (ticket.section) url.searchParams.set('section', ticket.section);
-        if (ticket.row) url.searchParams.set('row', ticket.row);
-      } else if (ticket.source === 'vividseats') {
-        url.searchParams.set('quantity', String(ticket.quantity || 1));
-        if (ticket.section) url.searchParams.set('section', ticket.section);
-        if (ticket.row) url.searchParams.set('row', ticket.row);
-      }
-
-      return url.toString();
-    } catch (e) {
-      console.error('Invalid event URL:', eventUrl);
-      return '#';
-    }
-  };
-
   if (!results?.data?.length) {
     return (
       <div className="p-4 text-center text-gray-500">
@@ -76,7 +73,7 @@ export default function TicketResults({ results, isLoading, lastUpdated }: Ticke
       {results.data.map((ticket) => (
         <a
           key={ticket.id}
-          href={ticket?.ticket_url}
+          href={ticket.ticket_url || '#'}
           target="_blank"
           rel="noopener noreferrer"
           className="block p-4 hover:bg-gray-50 transition duration-150 ease-in-out"
@@ -84,13 +81,13 @@ export default function TicketResults({ results, isLoading, lastUpdated }: Ticke
           <div className="flex justify-between items-start">
             <div>
               <h3 className="text-lg font-medium text-gray-900">
-                {ticket.event?.name}
+                {ticket.name}
               </h3>
               <p className="mt-1 text-sm text-gray-500">
-                {formatDate(ticket.event?.date)}
+                {formatDate(ticket.date)}
               </p>
               <p className="mt-1 text-sm text-gray-500">
-                {ticket.event?.venue}
+                {ticket.venue}
               </p>
               <p className="mt-2 text-sm text-gray-500">
                 Section {ticket.section} {ticket.row ? `Row ${ticket.row}` : ''}
