@@ -76,7 +76,7 @@ export default function TicketResults({ results, isLoading, lastUpdated }: Ticke
       {results.data.map((ticket) => (
         <a
           key={ticket.id}
-          href={getTicketUrl(ticket)}
+          href={ticket?.ticket_url}
           target="_blank"
           rel="noopener noreferrer"
           className="block p-4 hover:bg-gray-50 transition duration-150 ease-in-out"
