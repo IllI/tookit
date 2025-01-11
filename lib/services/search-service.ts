@@ -660,12 +660,18 @@ export class SearchService extends EventEmitter {
                         }
 
                         // Check date proximity (within 2 hours)
-                        const dateMatch = Math.abs(
-                          new Date(result.date).getTime() - new Date(bestEvent.date).getTime()
-                        ) <= 2 * 60 * 60 * 1000;
+                        const resultDate = new Date(result.date.replace(/(\d+)(?:st|nd|rd|th)/, '$1'));
+                        const eventDate = new Date(bestEvent.date);
+                        
+                        // Set hours to 0 for both dates before comparing
+                        resultDate.setHours(0, 0, 0, 0);
+                        const compareDate = new Date(eventDate);
+                        compareDate.setHours(0, 0, 0, 0);
+                        
+                        const dateMatch = resultDate.getTime() === compareDate.getTime();
                         
                         if (!dateMatch) {
-                          console.log(`Date mismatch: "${result.date}" vs "${bestEvent.date}"`);
+                          console.log(`Date mismatch: "${result.date}" (${resultDate.toISOString()}) vs "${bestEvent.date}" (${compareDate.toISOString()})`);
                           continue;
                         }
 
@@ -674,6 +680,19 @@ export class SearchService extends EventEmitter {
                           venue: result.venue,
                           date: result.date
                         });
+
+                        // Save the event link first
+                        const { error: linkError } = await this.supabase
+                          .from('event_links')
+                          .insert({
+                            event_id: savedEvent.id,
+                            source: service,
+                            url: result.url
+                          });
+
+                        if (linkError) {
+                          console.error('Error saving event link:', linkError);
+                        }
 
                         // Process tickets for this match and stop searching
                         await this.processEventPage(savedEvent.id, service, result.url);
