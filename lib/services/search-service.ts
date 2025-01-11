@@ -385,7 +385,7 @@ export class SearchService extends EventEmitter {
           const linkPromises = event.event_links.map(async (link: { source: string; url: string }) => {
             this.emit('status', `Updating tickets for ${event.name} from ${link.source}...`);
             try {
-              await this.processEventPage(event.id, link.source, link.url);
+             // await this.processEventPage(event.id, link.source, link.url);
             } catch (error) {
               // Log error but continue with other sources
               console.error(`Error updating tickets from ${link.source}:`, error);
@@ -475,61 +475,67 @@ export class SearchService extends EventEmitter {
       if (googleResults.length > 0) {
         this.emit('status', `Found ${googleResults.length} events via Google`);
         
-        // Filter events by location if specified
-        const filteredResults = params.location ? 
-          this.filterEventsByLocation(googleResults, params.location) :
-          googleResults;
-
-        this.emit('status', `Found ${filteredResults.length} matching events in ${params.location || 'any location'}`);
+        // Filter Google results by location and keyword
+        let filteredResults = googleResults;
         
-        // Select the best event based on completeness of information
-        const bestEvent = filteredResults.reduce((best, current) => {
-          // Score each event based on information completeness
-          const getEventScore = (event: GoogleSearchResult) => {
-            let score = 0;
-            // Prefer events with full title
-            if (event.name.toLowerCase().includes('tour')) score += 2;
-            if (event.name.toLowerCase().includes('album')) score += 1;
-            // Ensure required fields are present
-            if (event.venue && event.date && event.location) score += 3;
-            // Prefer events with more ticket links
-            if (event.ticket_links) score += event.ticket_links.length;
-            return score;
-          };
+        // Filter by location if provided
+        if (params.location) {
+          console.log('Filtering events by location:', params.location);
+          filteredResults = this.filterEventsByLocation(filteredResults, params.location);
+          console.log(`Found ${filteredResults.length} events matching location`);
+        }
 
-          const currentScore = getEventScore(current);
-          const bestScore = getEventScore(best);
+        // Filter by keyword
+        filteredResults = filteredResults.filter(event => {
+          const normalizedEventName = normalizeEventName(event.name);
+          const normalizedKeyword = normalizeEventName(params.keyword);
+          const nameMatch = normalizedEventName.includes(normalizedKeyword) || 
+                          normalizedKeyword.includes(normalizedEventName);
           
-          return currentScore > bestScore ? current : best;
-        }, filteredResults[0]);
-
-        console.log('Selected best event:', bestEvent);
-
-        // Collect all ticket links from all matching events
-        const allTicketLinks = new Map<string, { source: string; url: string }>();
-        
-        // First add links from the best event
-        bestEvent.ticket_links?.forEach(link => {
-          const key = `${link.source}-${link.url}`;
-          if (!allTicketLinks.has(key)) {
-            allTicketLinks.set(key, {
-              source: link.source,
-              url: link.url
-            });
+          if (!nameMatch) {
+            console.log(`Event name mismatch: "${event.name}" vs keyword "${params.keyword}"`);
           }
+          return nameMatch;
         });
 
-        // Then add links from all other matching events
+        console.log(`Found ${filteredResults.length} events matching keyword and location`);
+
+        if (filteredResults.length === 0) {
+          console.log('No matching events found in Google results');
+          return {
+            success: false,
+            data: [],
+            metadata: { sources: [] }
+          };
+        }
+
+        // Find the best matching event from filtered results
+        const bestEvent = this.findBestEvent(filteredResults);
+        console.log('Selected best matching event:', bestEvent);
+
+        // Initialize ticket links collection
+        const allTicketLinks = new Map<string, { source: string; url: string }>();
+        
+        // Collect ticket links from best event
+        bestEvent.ticket_links?.forEach(link => {
+          if (!link.source || !link.url) return;
+          const key = `${link.source}-${link.url}`;
+          allTicketLinks.set(key, {
+            source: link.source,
+            url: link.url
+          });
+        });
+
+        // Collect ticket links from other matching events
         filteredResults.forEach(event => {
           if (event !== bestEvent) {
             event.ticket_links?.forEach(link => {
+              if (!link.source || !link.url) return;
               const key = `${link.source}-${link.url}`;
-              if (!allTicketLinks.has(key)) {
-                allTicketLinks.set(key, {
-                  source: link.source,
-                  url: link.url
-                });
-              }
+              allTicketLinks.set(key, {
+                source: link.source,
+                url: link.url
+              });
             });
           }
         });
@@ -589,10 +595,17 @@ export class SearchService extends EventEmitter {
             console.error('Error saving event links:', linkError);
           }
 
-          // Process tickets from all supported ticket services
-          const supportedServices = ['stubhub', 'vividseats'] as const;
-          
-          for (const service of supportedServices) {
+          // After finding Google search results, check for Ticketmaster links
+          const ticketmasterLink = Array.from(allTicketLinks.values())
+            .find(link => link.source === 'ticketmaster');
+
+          if (ticketmasterLink) {
+            console.log('Found Ticketmaster link:', ticketmasterLink.url);
+            await this.processTicketmasterEvent(savedEvent.id, ticketmasterLink.url);
+          }
+
+          // Continue with other ticket sources
+          for (const service of ['stubhub', 'vividseats']) {
             try {
               // Check if we have a direct event link from Google results
               const serviceLink = Array.from(allTicketLinks.values())
@@ -845,11 +858,12 @@ ${html}[/INST]</s>`,
             const normalizedEventName = normalizeEventName(eventData.name);
             const normalizedKeyword = normalizeEventName(params.keyword);
             
-            // Check if the event name contains the keyword
-            return normalizedEventName.includes(normalizedKeyword);
+            // Check if either name contains the other
+            return normalizedEventName.includes(normalizedKeyword) || 
+                   normalizedKeyword.includes(normalizedEventName);
           })
           .map(eventData => ({
-            name: params.keyword, // Use the original search keyword as the normalized name
+            name: eventData.name, // Keep the original event name instead of using the keyword
             venue: eventData.venue,
             date: eventData.date,
             location: {
@@ -1259,6 +1273,112 @@ ${html}[/INST]</s>`;
 
     // Use Jaro-Winkler for fuzzy matching with a high threshold
     return calculateJaroWinklerSimilarity(venue1Norm, venue2Norm) > 0.9;
+  }
+
+  private async processTicketmasterEvent(eventId: string, url: string) {
+    try {
+      // Extract the Ticketmaster event ID from the URL - handle both formats
+      const tmEventId = url.match(/event\/([A-Z0-9]+)|\/([A-Z0-9]{16}$)/)?.[1] || url.match(/\/([A-Z0-9]{16})$/)?.[1];
+      if (!tmEventId) {
+        console.error('Could not extract Ticketmaster event ID from URL:', url);
+        return;
+      }
+
+      // Remove venue prefix if present (first 4 characters)
+      const eventId = tmEventId.length > 12 ? tmEventId.slice(4) : tmEventId;
+      console.log('Extracted Ticketmaster event ID:', eventId);
+
+      // Call Ticketmaster Discovery API v2 for US events
+      const consumerKey = process.env.TICKETMASTER_API_KEY;
+      if (!consumerKey) {
+        console.error('Available env vars:', Object.keys(process.env));
+        throw new Error('Ticketmaster Consumer Key not found in environment variables. Please ensure CONSUMER_KEY is set in .env');
+      }
+
+      // First search for the event to get the correct Discovery API ID
+      const searchResponse = await fetch(
+        `https://app.ticketmaster.com/discovery/v2/events.json?apikey=${consumerKey}&keyword=${encodeURIComponent(tmEventId)}`
+      );
+
+      if (!searchResponse.ok) {
+        const responseText = await searchResponse.text();
+        throw new Error(`Ticketmaster API error: ${searchResponse.statusText} (${searchResponse.status})\nResponse: ${responseText}`);
+      }
+
+      const searchData = await searchResponse.json();
+      console.log('Ticketmaster search response:', searchData);
+
+      if (!searchData._embedded?.events?.length) {
+        console.log('No events found in Ticketmaster search');
+        return;
+      }
+
+      // Use the first matching event
+      const tmEvent = searchData._embedded.events[0];
+      console.log('Found Ticketmaster event:', tmEvent);
+
+      // Extract ticket prices from the response
+      const tickets: TicketData[] = [];
+      
+      if (tmEvent.priceRanges) {
+        for (const priceRange of tmEvent.priceRanges) {
+          const price = parseFloat(priceRange.min);
+          if (isNaN(price)) continue;
+          
+          tickets.push({
+            section: priceRange.type || 'General',
+            row: 'GA',
+            price: price,
+            quantity: '1+',
+            source: 'ticketmaster',
+            listing_id: `${tmEventId}-${priceRange.type || 'general'}`,
+            ticket_url: url
+          });
+        }
+      }
+
+      // Save tickets to database
+      if (tickets.length > 0) {
+        const { error } = await this.supabase
+          .from('tickets')
+          .insert(tickets.map(ticket => ({
+            ...ticket,
+            event_id: eventId
+          })));
+
+        if (error) {
+          console.error('Error saving Ticketmaster tickets:', error);
+        }
+      } else {
+        console.log('No ticket prices found in Ticketmaster response');
+      }
+
+    } catch (error) {
+      console.error('Error processing Ticketmaster event:', error);
+      console.error('Full error:', error instanceof Error ? error.stack : error);
+    }
+  }
+
+  private findBestEvent(events: GoogleSearchResult[]): GoogleSearchResult {
+    return events.reduce((best, current) => {
+      // Score each event based on information completeness
+      const getEventScore = (event: GoogleSearchResult) => {
+        let score = 0;
+        // Prefer events with full title
+        if (event.name.toLowerCase().includes('tour')) score += 2;
+        if (event.name.toLowerCase().includes('album')) score += 1;
+        // Ensure required fields are present
+        if (event.venue && event.date && event.location) score += 3;
+        // Prefer events with more ticket links
+        if (event.ticket_links) score += event.ticket_links.length;
+        return score;
+      };
+
+      const currentScore = getEventScore(current);
+      const bestScore = getEventScore(best);
+      
+      return currentScore > bestScore ? current : best;
+    }, events[0]);
   }
 }
 
