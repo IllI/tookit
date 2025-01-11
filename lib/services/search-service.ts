@@ -627,15 +627,16 @@ export class SearchService extends EventEmitter {
                 for (const searchTerm of uniqueSearchTerms) {
                   if (foundMatches) break;
 
-                  const searchUrl = service === 'stubhub' ?
-                    `https://www.stubhub.com/search?q=${encodeURIComponent(searchTerm)}${locationTerm ? '+' + encodeURIComponent(locationTerm) : ''}` :
-                    `https://www.vividseats.com/search?q=${encodeURIComponent(searchTerm)}${locationTerm ? '+' + encodeURIComponent(locationTerm) : ''}`;
+                 const searchUrl = service === 'stubhub' ?
+                    `https://www.stubhub.com/secure/search?q=${encodeURIComponent(searchTerm)}+${encodeURIComponent(locationTerm)}` :
+                    `https://www.vividseats.com/search?searchTerm=${encodeURIComponent(searchTerm)}${locationTerm ? '+' + encodeURIComponent(locationTerm) : ''}`;
+                  
                   
                   console.log(`Searching ${service} with term: "${searchTerm}"`);
                   const searchHtml = await webReaderService.fetchPage(searchUrl);
                   
                   // Parse the search results
-                  const searchResults = await this.searchSite(searchHtml, service, {
+                  const searchResults = await this.searchSite(searchUrl, service, {
                     keyword: searchTerm,
                     location: locationTerm
                   });
@@ -668,33 +669,24 @@ export class SearchService extends EventEmitter {
                           continue;
                         }
 
-                        // Check name similarity against both keyword and bestEvent.name
-                        const keywordSimilarity = calculateJaroWinklerSimilarity(result.name, params.keyword);
-                        const eventNameSimilarity = calculateJaroWinklerSimilarity(result.name, bestEvent.name);
-                        const nameMatch = keywordSimilarity > 0.8 || eventNameSimilarity > 0.8;
-
-                        console.log(`Name similarity scores for "${result.name}":`, {
-                          keywordSimilarity,
-                          eventNameSimilarity
+                        console.log(`Found matching ${service} event:`, {
+                          resultName: result.name,
+                          venue: result.venue,
+                          date: result.date
                         });
 
-                        if (nameMatch) {
-                          console.log(`Found matching ${service} event:`, {
-                            resultName: result.name,
-                            venue: result.venue,
-                            date: result.date
-                          });
-
-                          // Process tickets for this match
-                          await this.processEventPage(savedEvent.id, service, result.url);
-                          foundMatches = true;
-                          break;
-                        }
+                        // Process tickets for this match and stop searching
+                        await this.processEventPage(savedEvent.id, service, result.url);
+                        foundMatches = true;
+                        break;
                       } catch (error) {
                         console.error(`Error processing search result:`, error);
                         continue;
                       }
                     }
+
+                    // If we found and processed a match, stop searching with other terms
+                    if (foundMatches) break;
                   }
                 }
 
@@ -834,20 +826,8 @@ ${html}[/INST]</s>`,
             const normalizedEventName = normalizeEventName(eventData.name);
             const normalizedKeyword = normalizeEventName(params.keyword);
             
-            // Check if keyword is at the start of the name
-            if (normalizedEventName.startsWith(normalizedKeyword)) {
-              // Get the next word after the keyword
-              const remainder = normalizedEventName
-                .slice(normalizedKeyword.length)
-                .trim()
-                .split(/\s+/)[0];
-              
-              // Common words that indicate this is the main event
-              const validConnectors = ['at', 'in', 'with', 'and', 'presents', '-'];
-              return !remainder || validConnectors.includes(remainder);
-            }
-
-            return false;
+            // Check if the event name contains the keyword
+            return normalizedEventName.includes(normalizedKeyword);
           })
           .map(eventData => ({
             name: params.keyword, // Use the original search keyword as the normalized name
