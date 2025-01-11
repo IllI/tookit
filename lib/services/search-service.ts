@@ -589,15 +589,121 @@ export class SearchService extends EventEmitter {
             console.error('Error saving event links:', linkError);
           }
 
-          // Process tickets from stubhub and vividseats links
-          const ticketSources = Array.from(allTicketLinks.values())
-            .filter(link => ['stubhub', 'vividseats'].includes(link.source));
-
-          for (const link of ticketSources) {
+          // Process tickets from all supported ticket services
+          const supportedServices = ['stubhub', 'vividseats'] as const;
+          
+          for (const service of supportedServices) {
             try {
-              await this.processEventPage(savedEvent.id, link.source, link.url);
+              // Check if we have a direct event link from Google results
+              const serviceLink = Array.from(allTicketLinks.values())
+                .find(link => link.source === service);
+
+              if (serviceLink) {
+                // If we have a direct link, process it
+                console.log(`Processing ${service} event page from direct link:`, serviceLink.url);
+                await this.processEventPage(savedEvent.id, service, serviceLink.url);
+              } else {
+                // If no direct link, we need to search the service
+                console.log(`No direct ${service} link found, searching ${service} for event match`);
+                
+                // Create search terms that combine both the keyword and best event name
+                const searchTerms = [
+                  params.keyword,
+                  bestEvent.name,
+                  // Extract artist/band name (usually before special characters)
+                  bestEvent.name.split(/[-–—(]/)[0].trim()
+                ].filter((term): term is string => Boolean(term));
+
+                // Remove duplicates and very short terms
+                const uniqueSearchTerms = Array.from(new Set(searchTerms))
+                  .filter(term => term.length > 2);
+
+                console.log('Using search terms:', uniqueSearchTerms);
+
+                const locationTerm = bestEvent.location?.city || params.location || '';
+                
+                // Try each search term until we find matches
+                let foundMatches = false;
+                for (const searchTerm of uniqueSearchTerms) {
+                  if (foundMatches) break;
+
+                  const searchUrl = service === 'stubhub' ?
+                    `https://www.stubhub.com/search?q=${encodeURIComponent(searchTerm)}${locationTerm ? '+' + encodeURIComponent(locationTerm) : ''}` :
+                    `https://www.vividseats.com/search?q=${encodeURIComponent(searchTerm)}${locationTerm ? '+' + encodeURIComponent(locationTerm) : ''}`;
+                  
+                  console.log(`Searching ${service} with term: "${searchTerm}"`);
+                  const searchHtml = await webReaderService.fetchPage(searchUrl);
+                  
+                  // Parse the search results
+                  const searchResults = await this.searchSite(searchHtml, service, {
+                    keyword: searchTerm,
+                    location: locationTerm
+                  });
+
+                  if (searchResults.length > 0) {
+                    console.log(`Found ${searchResults.length} potential matches from ${service}`);
+
+                    // For each search result, try to match it with our event
+                    for (const result of searchResults) {
+                      try {
+                        if (!result.url) {
+                          console.log('Search result missing URL, skipping');
+                          continue;
+                        }
+
+                        // Check venue match first
+                        const venueMatch = this.compareVenues(result.venue, bestEvent.venue);
+                        if (!venueMatch) {
+                          console.log(`Venue mismatch: "${result.venue}" vs "${bestEvent.venue}"`);
+                          continue;
+                        }
+
+                        // Check date proximity (within 2 hours)
+                        const dateMatch = Math.abs(
+                          new Date(result.date).getTime() - new Date(bestEvent.date).getTime()
+                        ) <= 2 * 60 * 60 * 1000;
+                        
+                        if (!dateMatch) {
+                          console.log(`Date mismatch: "${result.date}" vs "${bestEvent.date}"`);
+                          continue;
+                        }
+
+                        // Check name similarity against both keyword and bestEvent.name
+                        const keywordSimilarity = calculateJaroWinklerSimilarity(result.name, params.keyword);
+                        const eventNameSimilarity = calculateJaroWinklerSimilarity(result.name, bestEvent.name);
+                        const nameMatch = keywordSimilarity > 0.8 || eventNameSimilarity > 0.8;
+
+                        console.log(`Name similarity scores for "${result.name}":`, {
+                          keywordSimilarity,
+                          eventNameSimilarity
+                        });
+
+                        if (nameMatch) {
+                          console.log(`Found matching ${service} event:`, {
+                            resultName: result.name,
+                            venue: result.venue,
+                            date: result.date
+                          });
+
+                          // Process tickets for this match
+                          await this.processEventPage(savedEvent.id, service, result.url);
+                          foundMatches = true;
+                          break;
+                        }
+                      } catch (error) {
+                        console.error(`Error processing search result:`, error);
+                        continue;
+                      }
+                    }
+                  }
+                }
+
+                if (!foundMatches) {
+                  console.log(`No matching events found on ${service}`);
+                }
+              }
             } catch (error) {
-              console.error(`Error processing tickets from ${link.source}:`, error);
+              console.error(`Error processing ${service}:`, error);
             }
           }
         }
@@ -678,7 +784,7 @@ export class SearchService extends EventEmitter {
     }
   }
 
-  private async searchSite(url: string, source: string, params: SearchParams): Promise<EventData[]> {
+  private async searchSite(url: string, source: string, params: { keyword: string; location?: string }): Promise<EventData[]> {
     this.emit('status', `Searching ${source}...`);
     console.log(`Fetching URL: ${url}`);
     
@@ -1131,6 +1237,29 @@ ${html}[/INST]</s>`;
 
       return isMatch;
     });
+  }
+
+  private compareVenues(venue1: string, venue2: string): boolean {
+    // Normalize venue names
+    const normalize = (venue: string) => {
+      return venue.toLowerCase()
+        .replace(/[^a-z0-9\s]/g, '')  // Remove special characters
+        .replace(/\s+/g, ' ')         // Normalize spaces
+        .replace(/(theatre|theater|arena|stadium|hall|amphitheatre|amphitheater|pavilion|center|centre)/g, '') // Remove common venue type words
+        .trim();
+    };
+
+    const venue1Norm = normalize(venue1);
+    const venue2Norm = normalize(venue2);
+
+    // Check for exact match after normalization
+    if (venue1Norm === venue2Norm) return true;
+
+    // Check for substring match
+    if (venue1Norm.includes(venue2Norm) || venue2Norm.includes(venue1Norm)) return true;
+
+    // Use Jaro-Winkler for fuzzy matching with a high threshold
+    return calculateJaroWinklerSimilarity(venue1Norm, venue2Norm) > 0.9;
   }
 }
 
