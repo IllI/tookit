@@ -24,19 +24,19 @@ class GoogleEventsSearcher {
       // Fallback to regular search
       console.log('No events found via Events API, trying regular search...');
       
-      const result = await crawlerService.crawlPage({
-        url: searchUrl,
-        waitForSelector: 'body',
-        searchParams: {
-          keyword: artist,
-          location: location
-        }
-      });
+      // const result = await crawlerService.crawlPage({
+      //   url: searchUrl,
+      //   waitForSelector: 'body',
+      //   searchParams: {
+      //     keyword: artist,
+      //     location: location
+      //   }
+      // });
 
-      return (result?.data?.events || []).map(event => ({
-        ...event,
-        source: this.determineSource(event)
-      }));
+      // return (result?.data?.events || []).map(event => ({
+      //   ...event,
+      //   source: this.determineSource(event)
+      // }));
 
     } catch (error) {
       console.error('Google Events search error:', error);

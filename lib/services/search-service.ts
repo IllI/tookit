@@ -1,10 +1,10 @@
-import { getJson } from 'serpapi';
 import { EventEmitter } from 'events';
 import { HfInference } from '@huggingface/inference';
 import type { SearchParams, SearchResult } from '../types/api';
 import type { Event, TicketData, EventData, SearchMetadata } from '@/lib/types/schemas';
 import { createClient } from '@supabase/supabase-js';
 import { config } from '@/src/config/env';
+import GoogleEventsSearcher from '../services/google-events-searcher';
 import { webReaderService } from './parsehub-service';
 import * as cheerio from 'cheerio';
 
@@ -16,8 +16,6 @@ if (!HF_TOKEN) {
 console.log('HF Token available:', !!HF_TOKEN);
 
 const hf = new HfInference(HF_TOKEN || '');
-
-const SERPAPI_KEY = 'ef96da14f879948ae93fb073175e12ad532423ece415ab8ae4f6c612e2aef105';
 
 interface DbEvent {
   id: string;
@@ -50,8 +48,26 @@ interface DbTicket {
   };
 }
 
+interface GoogleSearchResult {
+  id?: string;
+  name: string;
+  date: string;
+  venue: string;
+  location: {
+    city: string;
+    state: string;
+    country: string;
+  };
+  ticket_links: Array<{
+    source: string;
+    url: string;
+    is_primary: boolean;
+  }>;
+}
+
 export class SearchService extends EventEmitter {
   private supabase;
+  private googleEventsSearcher: GoogleEventsSearcher;
 
   constructor() {
     super();
@@ -59,170 +75,1136 @@ export class SearchService extends EventEmitter {
       config.supabase.url,
       config.supabase.serviceKey || config.supabase.anonKey
     );
+    this.googleEventsSearcher = new GoogleEventsSearcher();
   }
 
-  async searchAll(params: SearchParams): Promise<SearchResult> {
-    try {
-      // First try Google Events API
-      this.emit('status', 'Searching Google Events API...');
-      const googleEvents = await this.searchGoogleEvents(params);
+  async findMatchingEvent(event: Event): Promise<DbEvent | null> {
+    // First get all events at the same venue within the time window
+    const { data: venueTimeMatches } = await this.supabase
+      .from('events')
+      .select(`
+        id,
+        name,
+        date,
+        venue,
+        event_links!inner(
+          source,
+          url
+        )
+      `)
+      .eq('venue', event.venue)
+      // Use a time window of ±2 hours for the date comparison
+      .gte('date', new Date(new Date(event.date).getTime() - 2 * 60 * 60 * 1000).toISOString())
+      .lte('date', new Date(new Date(event.date).getTime() + 2 * 60 * 60 * 1000).toISOString());
 
-      if (googleEvents.length > 0) {
-        this.emit('status', `Found ${googleEvents.length} events via Google Events API`);
-        
-        // Process found events
-        const processedEvents = await Promise.all(
-          googleEvents.map(async (event) => {
-            try {
-              const eventResult = await this.processGoogleEvent(event);
-              if (eventResult) {
-                return eventResult;
-              }
-            } catch (error) {
-              console.error('Error processing Google event:', error);
-            }
-            return null;
-          })
-        );
+    if (!venueTimeMatches?.length) return null;
 
-        const validEvents = processedEvents.filter((event): event is EventData => event !== null);
-        
-        if (validEvents.length > 0) {
-          return {
-            success: true,
-            data: validEvents,
-            metadata: {
-              sources: Array.from(new Set(validEvents.map(event => event.source!)))
-            }
-          };
-        }
-      }
+    // Extract the core event name by removing venue and location info
+    function extractCoreName(fullName: string): string {
+      const name = normalizeEventName(fullName);
+      
+      // Remove common venue/location patterns
+      const patterns = [
+        /\bat .+$/i,           // "at Venue Name"
+        /\bin .+$/i,           // "in City Name"
+        /,.+$/,                // ", City, State"
+        /\s*-\s*.+$/,         // "- Additional Info"
+        /\s+tickets?$/i,      // "tickets" at the end
+        /\s+concert$/i,       // "concert" at the end
+        /\s+live$/i,          // "live" at the end
+        /\s+tour$/i           // "tour" at the end
+      ];
+      
+      let coreName = name;
+      patterns.forEach(pattern => {
+        coreName = coreName.replace(pattern, '');
+      });
+      
+      return coreName.trim();
+    }
 
-      // If no results from Google Events API, fall back to existing search logic
-      return await this.searchVendors(params);
-    } catch (error) {
-      console.error('Search error:', error);
-      // Fall back to existing search logic if Google Events API fails
-      return await this.searchVendors(params);
+    // Among venue/time matches, find the best name match using fuzzy logic
+    const bestMatch = venueTimeMatches.reduce<DbEvent | null>((best, current) => {
+      const eventCoreName = extractCoreName(event.name);
+      const currentCoreName = extractCoreName(current.name);
+      
+      // Calculate similarity between core names
+      const similarity = calculateJaroWinklerSimilarity(eventCoreName, currentCoreName);
+      const bestSimilarity = best ? calculateJaroWinklerSimilarity(eventCoreName, extractCoreName(best.name)) : 0;
+
+      console.log(`Comparing event names:
+        Original: "${event.name}" -> Core: "${eventCoreName}"
+        Current: "${current.name}" -> Core: "${currentCoreName}"
+        Similarity: ${similarity}
+      `);
+
+      return similarity > bestSimilarity ? current : best;
+    }, null);
+
+    // Use a lower threshold (0.8) since we're matching core names
+    const matchSimilarity = bestMatch ? 
+      calculateJaroWinklerSimilarity(
+        extractCoreName(event.name),
+        extractCoreName(bestMatch.name)
+      ) : 0;
+
+    if (bestMatch && matchSimilarity >= 0.8) {
+      console.log(`Found matching event: "${event.name}" matches "${bestMatch.name}" (${matchSimilarity.toFixed(2)} similarity)`);
+      return bestMatch;
+    }
+
+    console.log(`No match found for "${event.name}" at ${event.venue}`);
+    return null;
+  }
+
+  async addEventLink(eventId: string, source: string, url: string) {
+    const { data: existingLink } = await this.supabase
+      .from('event_links')
+      .select()
+      .eq('event_id', eventId)
+      .eq('source', source)
+      .single();
+
+    if (!existingLink) {
+      await this.supabase
+        .from('event_links')
+        .insert({
+          event_id: eventId,
+          source,
+          url
+        });
     }
   }
 
-  private async searchGoogleEvents(params: SearchParams) {
+  async saveTickets(eventId: string, tickets: TicketData[]) {
     try {
-      const searchQuery = params.location ?
-        `${params.keyword} ${params.location}` :
-        params.keyword;
+      const formattedTickets = tickets.map(ticket => ({
+        event_id: eventId,
+        section: ticket.section || '',
+        row: ticket.row || '',
+        price: parseFloat(ticket.price.toString()),
+        quantity: parseInt(ticket.quantity?.toString() || '1'),
+        source: ticket.source,
+        listing_id: ticket.listing_id || crypto.randomUUID(),
+        ticket_url: ticket.ticket_url,
+        created_at: new Date().toISOString()
+      }));
 
-      const searchParams = {
-        engine: "google_events",
-        q: searchQuery,
-        location: params.location,
-        htichips: "date:upcoming",
-        hl: "en",
-        gl: "us",
-        api_key: SERPAPI_KEY
-      };
-
-      const response = await getJson(searchParams);
+      console.log('Saving tickets to database:', formattedTickets);
       
-      if (!response.events_results?.length) {
-        return [];
+      // First, delete existing tickets for this event/source combination
+      const { error: deleteError } = await this.supabase
+        .from('tickets')
+        .delete()
+        .eq('event_id', eventId)
+        .eq('source', tickets[0]?.source);
+
+      if (deleteError) {
+        console.error('Error deleting existing tickets:', deleteError);
+        // Continue processing even if delete fails
       }
 
-      return response.events_results.map(event => ({
-        title: event.title,
-        date: event.date?.start_date || event.date?.when,
-        venue: event.venue?.name,
-        address: event.venue?.address,
-        ticket_info: event.ticket_info
-      }));
+      // Then insert new tickets in batches to avoid conflicts
+      const batchSize = 50;
+      const savedTickets: any[] = [];
+      
+      for (let i = 0; i < formattedTickets.length; i += batchSize) {
+        const batch = formattedTickets.slice(i, i + batchSize);
+        try {
+          const { data, error: insertError } = await this.supabase
+            .from('tickets')
+            .upsert(batch, {
+              onConflict: 'event_id,section,row,price',
+              ignoreDuplicates: true
+            })
+            .select();
+
+          if (insertError) {
+            console.warn('Database warning saving tickets batch:', insertError);
+            // Continue processing other batches
+          }
+
+          if (data) {
+            savedTickets.push(...data);
+          }
+        } catch (error) {
+          console.warn(`Error saving batch ${i / batchSize + 1}:`, error);
+          // Continue with next batch
+        }
+      }
+
+      // Get all saved tickets for verification
+      const { data: verifiedTickets, error: selectError } = await this.supabase
+        .from('tickets')
+        .select()
+        .eq('event_id', eventId)
+        .eq('source', tickets[0]?.source);
+
+      if (selectError) {
+        console.warn('Warning fetching saved tickets:', selectError);
+      }
+
+      const successCount = verifiedTickets?.length || 0;
+      console.log(`Successfully saved ${successCount} out of ${tickets.length} tickets to database`);
+      
+      return verifiedTickets || [];
     } catch (error) {
-      console.error('Google Events API error:', error);
+      console.error('Error in saveTickets:', error);
+      // Return empty array but don't throw, allowing processing to continue
       return [];
     }
   }
 
-  private async processGoogleEvent(event: any): Promise<EventData | null> {
+  private async emitAllTickets(eventId: string) {
+    // Get ALL tickets for this event from ALL sources, including event links
+    const { data: tickets, error: ticketsError } = await this.supabase
+      .from('tickets')
+      .select(`
+        id,
+        event_id,
+        section,
+        row,
+        price,
+        quantity,
+        source,
+        listing_id,
+        ticket_url,
+        event:events (
+          id,
+          name,
+          date,
+          venue,
+          city,
+          state,
+          country,
+          event_links (
+            source,
+            url
+          )
+        )
+      `)
+      .eq('event_id', eventId)
+      .order('price');
+
+    if (ticketsError) {
+      console.error('Error fetching all tickets:', ticketsError);
+      return;
+    }
+
+    if (tickets?.length) {
+      // Format tickets with event data for frontend
+      const allTicketsWithEvent = tickets.map((ticket: any) => {
+        // Find the event link for this ticket's source
+        const eventLink = ticket.event.event_links?.find((link: any) => link.source === ticket.source);
+        
+        // Use ticket-specific URL if available, otherwise fall back to event URL
+        const ticketUrl = ticket.ticket_url || (eventLink ? eventLink.url : null);
+
+        return {
+          id: ticket.id,
+          name: ticket.event.name,
+          date: ticket.event.date,
+          venue: ticket.event.venue,
+          location: {
+            city: ticket.event.city,
+            state: ticket.event.state,
+            country: ticket.event.country
+          },
+          section: ticket.section,
+          row: ticket.row || '',
+          price: parseFloat(ticket.price.toString()),
+          quantity: parseInt(ticket.quantity.toString()),
+          source: ticket.source,
+          listing_id: ticket.listing_id,
+          ticket_url: ticketUrl
+        };
+      });
+
+      console.log('Found total tickets:', allTicketsWithEvent.length);
+      // Emit ALL tickets to frontend
+      this.emit('tickets', allTicketsWithEvent);
+      console.log(`Emitted ${allTicketsWithEvent.length} total tickets to frontend`);
+    }
+  }
+
+  private async processEventPage(eventId: string, source: string, url: string) {
     try {
-      // Find primary ticket vendor
-      const ticketInfo = event.ticket_info || [];
-      const primaryVendor = this.findPrimaryVendor(ticketInfo);
+      this.emit('status', `Processing event page from ${source}...`);
+      
+      const html = await webReaderService.fetchPage(url);
+      const result = await this.parseEventPage(html, source, eventId);
+      
+      if (result?.tickets?.length) {
+        try {
+          // Save to database first
+          const savedTickets = await this.saveTickets(eventId, result.tickets);
+          console.log(`Saved ${savedTickets.length} tickets to database for event`);
 
-      if (!primaryVendor) {
-        return null;
+          // Emit updated ticket list to frontend even if some tickets failed to save
+          await this.emitAllTickets(eventId);
+        } catch (error) {
+          console.error(`Error saving/emitting tickets for ${source}:`, error);
+          // Still return the parsed tickets even if saving failed
+        }
       }
 
-      // Parse location from address
-      const [city, state] = (event.address || '').split(',').map(part => part.trim());
-
-      return {
-        name: event.title,
-        date: event.date,
-        venue: event.venue,
-        location: {
-          city: city || '',
-          state: state || '',
-          country: 'US'
-        },
-        source: primaryVendor.source,
-        url: primaryVendor.link,
-        tickets: []
-      };
+      return result;
     } catch (error) {
-      console.error('Error processing Google event:', error);
-      return null;
+      console.error(`Error in processEventPage for ${source}:`, error);
+      this.emit('error', `Error processing ${source} event page: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      // Return empty result but don't throw
+      return { tickets: [] };
     }
   }
 
-  private findPrimaryVendor(ticketInfo: any[]) {
-    const PRIORITY_VENDORS = [
-      { name: 'ticketmaster', source: 'ticketmaster' },
-      { name: 'axs', source: 'axs' },
-      { name: 'etix', source: 'etix' },
-      { name: 'eventbrite', source: 'eventbrite' },
-      { name: 'dice.fm', source: 'dice' },
-      { name: 'bandsintown', source: 'bandsintown' }
-    ];
+  async searchAll(params: SearchParams): Promise<SearchResult> {
+    try {
+      // First, check for existing events
+      this.emit('status', 'Checking for existing events...');
+      const { data: existingEvents } = await this.supabase
+        .from('events')
+        .select(`
+          id,
+          name,
+          date,
+          venue,
+          event_links!inner(
+            source,
+            url
+          )
+        `)
+        .ilike('name', `%${params.keyword}%`)
+        .gte('date', new Date().toISOString());
 
-    // First try to find official/primary vendor
-    const primaryTicket = ticketInfo.find(ticket => 
-      ticket.type === 'primary' || ticket.is_official
-    );
+      // If we found existing events, update their tickets
+      if (existingEvents?.length) {
+        this.emit('status', `Found ${existingEvents.length} existing events. Updating tickets...`);
+        
+        // Process all events concurrently but wait for completion
+        await Promise.all(existingEvents.map(async event => {
+          const linkPromises = event.event_links.map(async (link: { source: string; url: string }) => {
+            this.emit('status', `Updating tickets for ${event.name} from ${link.source}...`);
+            try {
+              await this.processEventPage(event.id, link.source, link.url);
+            } catch (error) {
+              // Log error but continue with other sources
+              console.error(`Error updating tickets from ${link.source}:`, error);
+              this.emit('status', error instanceof Error ? error.message : 'Error updating tickets');
+            }
+          });
+          await Promise.all(linkPromises);
+        }));
 
-    if (primaryTicket?.link) {
-      const vendorMatch = PRIORITY_VENDORS.find(vendor => 
-        primaryTicket.source.toLowerCase().includes(vendor.name)
-      );
-      if (vendorMatch) {
+        // Get all tickets for these events after processing is complete
+        const { data: tickets } = await this.supabase
+          .from('tickets')
+          .select(`
+            id,
+            event_id,
+            section,
+            row,
+            price,
+            quantity,
+            source,
+            listing_id,
+            ticket_url,
+            event:events (
+              id,
+              name,
+              date,
+              venue,
+              city,
+              state,
+              country,
+              event_links (
+                source,
+                url
+              )
+            )
+          `)
+          .in('event_id', existingEvents.map(e => e.id))
+          .order('price');
+
+        // Format tickets with event data for frontend
+        const allTicketsWithEvent = tickets?.map((ticket: any) => {
+          const eventLink = ticket.event.event_links?.find((link: any) => link.source === ticket.source);
+          const ticketUrl = ticket.ticket_url || (eventLink ? eventLink.url : null);
+
+          return {
+            id: ticket.id,
+            name: ticket.event.name,
+            date: ticket.event.date,
+            venue: ticket.event.venue,
+            location: {
+              city: ticket.event.city,
+              state: ticket.event.state,
+              country: ticket.event.country
+            },
+            tickets: [],
+            price: parseFloat(ticket.price.toString()),
+            section: ticket.section,
+            row: ticket.row || '',
+            quantity: parseInt(ticket.quantity.toString()),
+            source: ticket.source,
+            listing_id: ticket.listing_id,
+            ticket_url: ticketUrl
+          };
+        }) || [];
+
+        const metadata: SearchMetadata = {
+          sources: Array.from(new Set(allTicketsWithEvent.map(t => t.source)))
+        };
+
         return {
-          source: vendorMatch.source,
-          link: primaryTicket.link
+          success: true,
+          data: allTicketsWithEvent,
+          metadata
         };
       }
-    }
 
-    // Then try to find by priority
-    for (const vendor of PRIORITY_VENDORS) {
-      const ticket = ticketInfo.find(t => 
-        t.source?.toLowerCase().includes(vendor.name)
-      );
-      if (ticket?.link) {
+      // If no existing events, run new searches
+      this.emit('status', 'Starting new search...');
+      this.emit('status', 'Searching via Google Events...');
+      
+      const googleResults = await this.googleEventsSearcher.searchConcerts(
+        params.keyword,
+        undefined,
+        params.location
+      ) as GoogleSearchResult[];
+
+      if (googleResults.length > 0) {
+        this.emit('status', `Found ${googleResults.length} events via Google`);
+        
+        // Filter events by location if specified
+        const filteredResults = params.location ? 
+          this.filterEventsByLocation(googleResults, params.location) :
+          googleResults;
+
+        this.emit('status', `Found ${filteredResults.length} matching events in ${params.location || 'any location'}`);
+        
+        // Select the best event based on completeness of information
+        const bestEvent = filteredResults.reduce((best, current) => {
+          // Score each event based on information completeness
+          const getEventScore = (event: GoogleSearchResult) => {
+            let score = 0;
+            // Prefer events with full title
+            if (event.name.toLowerCase().includes('tour')) score += 2;
+            if (event.name.toLowerCase().includes('album')) score += 1;
+            // Ensure required fields are present
+            if (event.venue && event.date && event.location) score += 3;
+            // Prefer events with more ticket links
+            if (event.ticket_links) score += event.ticket_links.length;
+            return score;
+          };
+
+          const currentScore = getEventScore(current);
+          const bestScore = getEventScore(best);
+          
+          return currentScore > bestScore ? current : best;
+        }, filteredResults[0]);
+
+        console.log('Selected best event:', bestEvent);
+
+        // Collect all ticket links from all matching events
+        const allTicketLinks = new Map<string, { source: string; url: string }>();
+        
+        // First add links from the best event
+        bestEvent.ticket_links?.forEach(link => {
+          const key = `${link.source}-${link.url}`;
+          if (!allTicketLinks.has(key)) {
+            allTicketLinks.set(key, {
+              source: link.source,
+              url: link.url
+            });
+          }
+        });
+
+        // Then add links from all other matching events
+        filteredResults.forEach(event => {
+          if (event !== bestEvent) {
+            event.ticket_links?.forEach(link => {
+              const key = `${link.source}-${link.url}`;
+              if (!allTicketLinks.has(key)) {
+                allTicketLinks.set(key, {
+                  source: link.source,
+                  url: link.url
+                });
+              }
+            });
+          }
+        });
+
+        console.log('All collected ticket links:', Array.from(allTicketLinks.values()));
+
+        // Create single event from best match
+        const { data: savedEvent, error: eventError } = await this.supabase
+          .from('events')
+          .upsert({
+            name: bestEvent.name,
+            date: bestEvent.date,
+            venue: bestEvent.venue,
+            city: bestEvent.location.city,
+            state: bestEvent.location.state,
+            country: bestEvent.location.country,
+            created_at: new Date().toISOString()
+          })
+          .select()
+          .single();
+
+        if (eventError) {
+          console.error('Error saving event:', eventError);
+          return {
+            success: false,
+            data: [],
+            metadata: { sources: [] }
+          };
+        }
+
+        if (savedEvent) {
+          // Save all collected ticket links
+          const eventLinks = Array.from(allTicketLinks.values()).map(link => ({
+            event_id: savedEvent.id,
+            source: link.source,
+            url: link.url
+          }));
+
+          console.log('Saving event links:', eventLinks);
+
+          // First delete existing links for this event
+          const { error: deleteError } = await this.supabase
+            .from('event_links')
+            .delete()
+            .eq('event_id', savedEvent.id);
+
+          if (deleteError) {
+            console.error('Error deleting existing event links:', deleteError);
+          }
+
+          // Then insert new links
+          const { error: linkError } = await this.supabase
+            .from('event_links')
+            .insert(eventLinks);
+
+          if (linkError) {
+            console.error('Error saving event links:', linkError);
+          }
+
+          // Process tickets from stubhub and vividseats links
+          const ticketSources = Array.from(allTicketLinks.values())
+            .filter(link => ['stubhub', 'vividseats'].includes(link.source));
+
+          for (const link of ticketSources) {
+            try {
+              await this.processEventPage(savedEvent.id, link.source, link.url);
+            } catch (error) {
+              console.error(`Error processing tickets from ${link.source}:`, error);
+            }
+          }
+        }
+
+        // Return formatted results
+        const { data: savedTickets } = await this.supabase
+          .from('tickets')
+          .select(`
+            id,
+            event_id,
+            section,
+            row,
+            price,
+            quantity,
+            source,
+            listing_id,
+            ticket_url,
+            event:events (
+              id,
+              name,
+              date,
+              venue,
+              city,
+              state,
+              country,
+              event_links (
+                source,
+                url
+              )
+            )
+          `)
+          .in('event_id', googleResults.filter(event => event.id).map(event => event.id!))
+          .order('price');
+
+        const formattedTickets = savedTickets?.map((ticket: any) => ({
+          id: ticket.id,
+          name: ticket.event.name,
+          date: ticket.event.date,
+          venue: ticket.event.venue,
+          location: {
+            city: ticket.event.city,
+            state: ticket.event.state,
+            country: ticket.event.country
+          },
+          tickets: [],
+          price: parseFloat(ticket.price.toString()),
+          section: ticket.section,
+          row: ticket.row || '',
+          quantity: parseInt(ticket.quantity.toString()),
+          source: ticket.source,
+          listing_id: ticket.listing_id,
+          ticket_url: ticket.ticket_url
+        })) || [];
+
         return {
-          source: vendor.source,
-          link: ticket.link
+          success: true,
+          data: formattedTickets,
+          metadata: {
+            sources: Array.from(new Set(formattedTickets.map(t => t.source)))
+          }
         };
       }
+
+      // If no results found
+      return {
+        success: true,
+        data: [],
+        metadata: { sources: [] }
+      };
+
+    } catch (error) {
+      console.error('Search error:', error);
+      return {
+        success: false,
+        data: [],
+        metadata: { sources: [] }
+      };
     }
-
-    return null;
   }
 
-  // Renamed the original searchAll to searchVendors
-  private async searchVendors(params: SearchParams): Promise<SearchResult> {
-    // ... (rest of the original searchAll method code)
+  private async searchSite(url: string, source: string, params: SearchParams): Promise<EventData[]> {
+    this.emit('status', `Searching ${source}...`);
+    console.log(`Fetching URL: ${url}`);
+    
+    try {
+      // Get HTML from Jina Reader
+      const html = await webReaderService.fetchPage(url);
+      console.log(`Received HTML from ${source} (${html.length} bytes)`);
+
+      try {
+        const response = await hf.textGeneration({
+          model: 'mistralai/Mistral-7B-Instruct-v0.2',
+          inputs: `<s>[INST]Extract events from HTML as JSON array. Format: [{"name":"event name","venue":"venue name","date":"YYYY-MM-DD","city":"city name","state":"ST","country":"US","url":"url path"}]. Return only JSON array.
+
+${html}[/INST]</s>`,
+          parameters: {
+            max_new_tokens: 1000,
+            temperature: 0.1,
+            do_sample: false,
+            stop: ["</s>", "[INST]"]
+          }
+        });
+
+        console.log(`Chunk response:`, response.generated_text);
+
+        let eventsData: any[];
+        try {
+          // Find the last occurrence of a JSON array (after the HTML)
+          const lastJsonMatch = response.generated_text.split('</body></html>')[1]?.match(/\[\s*{[\s\S]*}\s*\]/);
+          const cleanedResponse = lastJsonMatch ? lastJsonMatch[0] : '[]';
+          console.log('Cleaned response:', cleanedResponse);
+          const parsed = JSON.parse(cleanedResponse);
+          eventsData = Array.isArray(parsed) ? parsed : [parsed];
+          console.log('Parsed event data:', eventsData);
+        } catch (e) {
+          console.error('Failed to parse HF response:', e);
+          return [];
+        }
+
+        // Filter and convert events to EventData format
+        const events = eventsData
+          .filter(eventData => {
+            // Skip obvious auxiliary events by checking venue
+            if (eventData.venue.toLowerCase().includes('parking')) {
+              return false;
+            }
+
+            const normalizedEventName = normalizeEventName(eventData.name);
+            const normalizedKeyword = normalizeEventName(params.keyword);
+            
+            // Check if keyword is at the start of the name
+            if (normalizedEventName.startsWith(normalizedKeyword)) {
+              // Get the next word after the keyword
+              const remainder = normalizedEventName
+                .slice(normalizedKeyword.length)
+                .trim()
+                .split(/\s+/)[0];
+              
+              // Common words that indicate this is the main event
+              const validConnectors = ['at', 'in', 'with', 'and', 'presents', '-'];
+              return !remainder || validConnectors.includes(remainder);
+            }
+
+            return false;
+          })
+          .map(eventData => ({
+            name: params.keyword, // Use the original search keyword as the normalized name
+            venue: eventData.venue,
+            date: eventData.date,
+            location: {
+              city: eventData.city,
+              state: eventData.state,
+              country: eventData.country || 'US'
+            },
+            source,
+            url: eventData.url.startsWith('http') ? eventData.url : 
+                 source === 'vividseats' ? `https://www.vividseats.com${eventData.url}` :
+                 `https://www.stubhub.com${eventData.url}`,
+            tickets: [] as TicketData[]
+          }));
+
+        return events;
+
+      } catch (error) {
+        console.error('HF API error:', error);
+        return [];
+      }
+    } catch (error) {
+      console.error(`Error searching ${source}:`, error);
+      return [];
+    }
   }
 
-  // ... (rest of the existing class code)
+  private async processVividSeatsChunks(
+    $: cheerio.Root,
+    elementArray: cheerio.Element[],
+    startIndex: number,
+    chunkSize: number,
+    eventId?: string
+  ): Promise<TicketData[]> {
+    try {
+      // Get all listing containers
+      const listingContainers = $('[data-testid="listings-container"] a');
+      console.log(`Found ${listingContainers.length} listing containers in HTML`);
+      
+      const chunks: cheerio.Element[][] = [];
+      
+      // Split into chunks
+      for (let i = 0; i < listingContainers.length; i += chunkSize) {
+        chunks.push(listingContainers.slice(i, i + chunkSize).toArray());
+      }
+
+      console.log(`Processing ${listingContainers.length} tickets in ${chunks.length} chunks`);
+
+      // If we have an eventId, first delete existing tickets for this source
+      if (eventId) {
+        console.log('Deleting existing tickets for event before processing new ones');
+        const { error: deleteError } = await this.supabase
+          .from('tickets')
+          .delete()
+          .eq('event_id', eventId)
+          .eq('source', 'vividseats');
+
+        if (deleteError) {
+          console.error('Error deleting existing tickets:', deleteError);
+          throw deleteError;
+        }
+      }
+
+      const allTickets: TicketData[] = [];
+      const processedListingIds = new Set<string>();
+
+      // Process each chunk asynchronously
+      const processChunk = async (chunk: cheerio.Element[], chunkIndex: number): Promise<TicketData[]> => {
+        try {
+          // Wrap each ticket element in a div with a data attribute for better parsing
+          const wrappedHtml = chunk.map((el, i) => {
+            const ticketHtml = $.html(el);
+            return `<div data-ticket-index="${chunkIndex * chunkSize + i}">${ticketHtml}</div>`;
+          }).join('\n');
+
+          console.log(`Processing chunk ${chunkIndex + 1}, tickets ${chunkIndex * chunkSize + 1}-${Math.min((chunkIndex + 1) * chunkSize, listingContainers.length)}`);
+
+          const response = await hf.textGeneration({
+            model: 'mistralai/Mistral-7B-Instruct-v0.2',
+            inputs: `<s>[INST]Extract ticket listings from HTML. Each ticket is wrapped in a div. For each ticket extract:
+- section: The section name (e.g. "GA Main Floor", "GA Balcony", "GA4")
+- row: The row number/letter (e.g. "G4", "12", "GA")
+- price: The numeric price value
+- quantity: The number of tickets available
+- source: Always "vividseats"
+- listing_id: The data-testid attribute value
+- ticket_url: The href attribute from the anchor tag
+
+Example output:
+[{"section":"GA4","row":"G4","price":79,"quantity":1,"source":"vividseats","listing_id":"VB11556562645","ticket_url":"https://www.vividseats.com/poppy-tickets-chicago-house-of-blues-chicago-3-21-2025--concerts-pop/production/5369315?showDetails=VB11556562645"}]
+
+HTML to extract from:
+${wrappedHtml}[/INST]</s>`,
+            parameters: {
+              max_new_tokens: 4000,
+              temperature: 0.1,
+              do_sample: false,
+              stop: ["</s>", "[INST]"]
+            }
+          });
+
+          const responseText = response.generated_text.split('[/INST]</s>')[1];
+          if (!responseText) {
+            console.log(`No response text found after [/INST]</s> in chunk ${chunkIndex + 1}`);
+            return [];
+          }
+
+          const cleanedResponse = responseText
+            .replace(/\\\\/g, '\\')
+            .replace(/\\"/g, '"')
+            .replace(/\\n/g, ' ')
+            .replace(/\\t/g, ' ')
+            .replace(/\\_/g, '_')
+            .replace(/[^\x20-\x7E]/g, '')
+            .trim();
+
+          // Try to find the last complete JSON object if response was truncated
+          const jsonMatch = cleanedResponse.match(/\[\s*{[\s\S]*?}\s*\]/);
+          let chunkTickets: TicketData[] = [];
+
+          if (!jsonMatch) {
+            // Try to find any complete JSON objects in the response
+            const objectMatches = cleanedResponse.match(/{\s*"section"[\s\S]*?}/g);
+            if (objectMatches) {
+              try {
+                chunkTickets = JSON.parse(`[${objectMatches.join(',')}]`);
+              } catch (e) {
+                console.error(`Error parsing individual tickets from chunk ${chunkIndex + 1}:`, e);
+              }
+            }
+          } else {
+            try {
+              const parsed = JSON.parse(jsonMatch[0]);
+              chunkTickets = Array.isArray(parsed) ? parsed : [parsed];
+            } catch (error) {
+              console.error(`Error parsing JSON from chunk ${chunkIndex + 1}:`, error);
+            }
+          }
+
+          // Filter out duplicates by listing_id
+          const uniqueTickets = chunkTickets.filter(ticket => {
+            if (!ticket.listing_id || processedListingIds.has(ticket.listing_id)) {
+              return false;
+            }
+            processedListingIds.add(ticket.listing_id);
+            return true;
+          });
+
+          if (uniqueTickets.length > 0) {
+            console.log(`Found ${uniqueTickets.length} tickets in chunk ${chunkIndex + 1}`);
+            
+            // Save tickets to database and update frontend immediately if we have an eventId
+            if (eventId) {
+              try {
+                await this.saveTickets(eventId, uniqueTickets);
+                await this.emitAllTickets(eventId);
+              } catch (error) {
+                console.error(`Error saving tickets from chunk ${chunkIndex + 1}:`, error);
+              }
+            }
+
+            allTickets.push(...uniqueTickets);
+          }
+
+          return uniqueTickets;
+        } catch (error) {
+          console.error(`Error processing chunk ${chunkIndex + 1}:`, error);
+          return [];
+        }
+      };
+
+      // Process all chunks concurrently
+      const chunkPromises = chunks.map((chunk, index) => processChunk(chunk, index));
+
+      // Wait for all chunks to complete
+      await Promise.all(chunkPromises);
+
+      console.log(`Total unique tickets found: ${processedListingIds.size}`);
+      return allTickets;
+    } catch (error) {
+      console.error('Error in processVividSeatsChunks:', error);
+      return [];
+    }
+  }
+
+  private async parseEventPage(html: string, source: string, eventId?: string) {
+    try {
+      // First check if HTML is small enough to process in one go
+      const estimatedTokens = html.length / 4;
+      const TOKEN_LIMIT = 32000;
+
+      if (source === 'vividseats' && estimatedTokens > TOKEN_LIMIT) {
+        // For large VividSeats HTML, pro cess in chunks
+        console.log('VividSeats HTML exceeds token limit, processing in chunks');
+        const $ = cheerio.load(html);
+        const ticketElements = $('[data-testid="listings-container"]');
+        const elementArray = ticketElements.toArray();
+        const CHUNK_SIZE = 10;
+
+        console.log(`Processing ${elementArray.length} tickets in chunks of ${CHUNK_SIZE}`);
+        const tickets = await this.processVividSeatsChunks($, elementArray, 0, CHUNK_SIZE, eventId);
+        return { tickets };
+      }
+
+      // Use existing logic for small HTML or non-VividSeats sources
+      const prompt = source === 'vividseats' ?
+        `<s>[INST]Extract ticket listings from HTML as JSON array. Each ticket should be a JSON object with these fields:
+- section: The section name (e.g. "GA", "Floor", "Balcony")
+- row: The row number/letter (use "GA" for general admission)
+- price: The numeric price value (e.g. 192)
+- quantity: The number of tickets (e.g. "2" or range like "1-8")
+- source: Always "vividseats"
+- listing_id: The data-testid attribute value
+- ticket_url: The href attribute from the anchor tag
+
+Example output:
+[{"section":"GA","row":"GA","price":192,"quantity":"1-8","source":"vividseats","listing_id":"VB11572186950","ticket_url":"https://www.vividseats.com/..."}]
+
+Return only the JSON array, no explanations.
+
+${html}[/INST]</s>` :
+        `<s>[INST]Extract ticket listings from HTML as JSON array. Each ticket should be a JSON object with these fields:
+- section: The section name (e.g. "Floor GA", "GA Standing")
+- row: The row number/letter (use "GA" for general admission)
+- price: The numeric price value (e.g. 123.45)
+- quantity: The number of tickets (e.g. "2" or range like "1-4")
+- source: Always "stubhub"
+- listing_id: The data-listing-id attribute value
+- ticket_url: The href attribute from the anchor tag
+
+Example output:
+[{"section":"Floor GA","row":"GA","price":123.45,"quantity":"2","source":"stubhub","listing_id":"123456","ticket_url":"https://www.stubhub.com/..."}]
+
+Return only the JSON array, no explanations.
+
+${html}[/INST]</s>`;
+
+      const response = await hf.textGeneration({
+        model: 'mistralai/Mistral-7B-Instruct-v0.2',
+        inputs: prompt,
+        parameters: { 
+          max_new_tokens: 10000,
+          temperature: 0.1,
+          do_sample: false,
+          stop: ["</s>", "[INST]"]
+        }
+      });
+
+      let tickets: TicketData[];
+      try {
+        // Extract JSON array from response
+        const responseText = response.generated_text.split('[/INST]</s>')[1];
+        console.log('Raw response text:', responseText);
+
+        // Clean up the response text
+        const cleanedResponse = responseText
+          .replace(/\[\s*\[/g, '[{')           // Convert [[ to [{
+          .replace(/\]\s*\]/g, '}]')           // Convert ]] to }]
+          .replace(/\\\\/g, '\\')              // Fix escaped backslashes
+          .replace(/\\"/g, '"')                // Fix escaped quotes
+          .replace(/\\n/g, ' ')                // Replace newlines
+          .replace(/\\t/g, ' ')                // Replace tabs
+          .replace(/\\_/g, '_')                // Fix escaped underscores
+          .replace(/[^\x20-\x7E]/g, '')        // Remove non-printable chars
+          .trim();
+
+        // Try to find a valid JSON array in the cleaned response
+        const jsonMatch = cleanedResponse.match(/\[\s*\{[\s\S]*?\}\s*\]/);
+        if (!jsonMatch) {
+          // If no object format found, try array format
+          const arrayMatch = cleanedResponse.match(/\[\s*\[[\s\S]*?\]\s*\]/);
+          if (arrayMatch) {
+            // Convert array format to object format
+            const arrayData = JSON.parse(arrayMatch[0]);
+            if (Array.isArray(arrayData) && arrayData.length > 0 && Array.isArray(arrayData[0])) {
+              const objectData = arrayData.map(([section, row, price, quantity, listing_id, ticket_url]) => ({
+                section,
+                row,
+                price,
+                quantity,
+                source: source,
+                listing_id,
+                ticket_url
+              }));
+              tickets = objectData;
+            } else {
+              console.log('Invalid array format in response');
+              return { tickets: [] };
+            }
+          } else {
+            console.log('No valid JSON found in response');
+            return { tickets: [] };
+          }
+        } else {
+          try {
+            const parsed = JSON.parse(jsonMatch[0]);
+            tickets = Array.isArray(parsed) ? parsed : [parsed];
+          } catch (e) {
+            console.error('JSON parse error:', e);
+            console.error('Failed to parse string:', jsonMatch[0]);
+            return { tickets: [] };
+          }
+        }
+
+        // Clean up and validate the data
+        tickets = tickets.map(ticket => {
+          // Convert quantity string to number (take the first number in a range)
+          const quantityStr = ticket.quantity?.toString() || '1';
+          const quantity = parseInt(quantityStr.split('-')[0]);
+
+          // Clean up ticket URL if it's a relative path
+          let ticketUrl = ticket.ticket_url || null;
+          if (ticketUrl && !ticketUrl.startsWith('http')) {
+            ticketUrl = source === 'vividseats' 
+              ? `https://www.vividseats.com${ticketUrl}`
+              : `https://www.stubhub.com${ticketUrl}`;
+          }
+
+          return {
+            section: ticket.section || 'General Admission',
+            row: ticket.row === 'NA' ? 'GA' : ticket.row || 'GA',
+            price: parseFloat(ticket.price?.toString() || '0'),
+            quantity: quantity,
+            source: ticket.source || source,
+            listing_id: ticket.listing_id || crypto.randomUUID(),
+            ticket_url: ticketUrl
+          };
+        }).filter(ticket => 
+          ticket.price > 0 && 
+          ticket.section.length > 0
+        );
+
+        // Remove duplicates based on section, row, and price
+        tickets = tickets.filter((ticket, index, self) =>
+          index === self.findIndex((t) => (
+            t.section === ticket.section &&
+            t.row === ticket.row &&
+            t.price === ticket.price
+          ))
+        );
+
+        console.log(`Found ${tickets.length} tickets from ${source}`);
+      } catch (e) {
+        console.error('Failed to parse HF response:', e);
+        return { tickets: [] };
+      }
+
+      return { tickets };
+    } catch (error) {
+      console.error(`Error parsing ${source} event page:`, error);
+      return { tickets: [] };
+    }
+  }
+
+  private filterEventsByLocation(events: GoogleSearchResult[], searchLocation: string): GoogleSearchResult[] {
+    // Normalize the search location
+    const normalizedSearch = searchLocation.toLowerCase().trim();
+    
+    return events.filter(event => {
+      if (!event.location) return false;
+
+      // Check if the location matches either city or state
+      const cityMatch = event.location.city.toLowerCase().includes(normalizedSearch);
+      const stateMatch = event.location.state.toLowerCase().includes(normalizedSearch);
+      
+      // Also check venue name as it might contain location info
+      const venueMatch = event.venue?.toLowerCase().includes(normalizedSearch);
+
+      // For US state codes, try to match exactly
+      const isStateCode = normalizedSearch.length === 2;
+      const stateCodeMatch = isStateCode && 
+        event.location.state.toLowerCase() === normalizedSearch;
+
+      const isMatch = cityMatch || stateMatch || stateCodeMatch || venueMatch;
+      
+      if (isMatch) {
+        console.log(`Location match found for "${event.name}" at ${event.venue}:`, {
+          searchLocation: normalizedSearch,
+          eventCity: event.location.city,
+          eventState: event.location.state,
+          venue: event.venue,
+          matched: isMatch ? 'yes' : 'no'
+        });
+      }
+
+      return isMatch;
+    });
+  }
+}
+
+// Helper functions
+function normalizeEventName(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, '') // Remove special characters
+    .replace(/\s+/g, ' ')        // Normalize spaces
+    .trim();
+}
+
+function calculateJaroWinklerSimilarity(s1: string, s2: string): number {
+  const s1Norm = normalizeEventName(s1);
+  const s2Norm = normalizeEventName(s2);
+  
+  if (s1Norm === s2Norm) return 1;
+  if (s1Norm.length === 0 || s2Norm.length === 0) return 0;
+
+  // Maximum distance between matching characters
+  const matchDistance = Math.floor(Math.max(s1Norm.length, s2Norm.length) / 2) - 1;
+
+  // Find matching characters
+  const s1Matches: boolean[] = Array(s1Norm.length).fill(false);
+  const s2Matches: boolean[] = Array(s2Norm.length).fill(false);
+  let matches = 0;
+
+  for (let i = 0; i < s1Norm.length; i++) {
+    const start = Math.max(0, i - matchDistance);
+    const end = Math.min(i + matchDistance + 1, s2Norm.length);
+
+    for (let j = start; j < end; j++) {
+      if (!s2Matches[j] && s1Norm[i] === s2Norm[j]) {
+        s1Matches[i] = true;
+        s2Matches[j] = true;
+        matches++;
+        break;
+      }
+    }
+  }
+
+  if (matches === 0) return 0;
+
+  // Count transpositions
+  let transpositions = 0;
+  let k = 0;
+
+  for (let i = 0; i < s1Norm.length; i++) {
+    if (!s1Matches[i]) continue;
+    
+    while (!s2Matches[k]) k++;
+    
+    if (s1Norm[i] !== s2Norm[k]) transpositions++;
+    k++;
+  }
+
+  // Calculate Jaro similarity
+  const jaroSimilarity = (
+    matches / s1Norm.length +
+    matches / s2Norm.length +
+    (matches - transpositions / 2) / matches
+  ) / 3;
+
+  // Calculate common prefix length (up to 4 characters)
+  let commonPrefix = 0;
+  const maxPrefix = Math.min(4, Math.min(s1Norm.length, s2Norm.length));
+  for (let i = 0; i < maxPrefix; i++) {
+    if (s1Norm[i] === s2Norm[i]) commonPrefix++;
+    else break;
+  }
+
+  // Winkler modification: give more weight to strings with matching prefixes
+  const winklerModification = 0.1; // Standard scaling factor
+  return jaroSimilarity + (commonPrefix * winklerModification * (1 - jaroSimilarity));
 }
 
 export const searchService = new SearchService();
