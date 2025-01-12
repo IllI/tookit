@@ -332,7 +332,7 @@ export class SearchService extends EventEmitter {
       this.emit('status', `Processing event page from ${source}...`);
       
       // Only fetch HTML if not provided
-      const pageHtml = html || await webReaderService.fetchPage(url);
+      const pageHtml = await webReaderService.fetchPage(url);
       const result = await this.parseEventPage(pageHtml, source, eventId);
       
       if (result?.tickets?.length) {
@@ -1056,7 +1056,6 @@ ${wrappedHtml}[/INST]</s>`,
       }
 
       // Use existing logic for small HTML or non-VividSeats sources
-      // Use existing logic for small HTML or non-VividSeats sources
       const prompt = source === 'vividseats' ?
         `<s>[INST]Extract ticket listings from HTML as JSON array. Each ticket should be a JSON object with these fields:
 - section: The section name (e.g. "GA", "Floor", "Balcony")
@@ -1104,7 +1103,7 @@ ${html}[/INST]</s>`;
       try {
         // Extract JSON array from response
         const responseText = response.generated_text.split('[/INST]</s>')[1];
-        console.log('Raw response text:', response.generated_text);
+        console.log('Raw response text:', responseText);
 
         // Clean up the response text
         const cleanedResponse = responseText
@@ -1205,6 +1204,7 @@ ${html}[/INST]</s>`;
       return { tickets: [] };
     }
   }
+
 
   private filterEventsByLocation(events: GoogleSearchResult[], searchLocation: string): GoogleSearchResult[] {
     // Normalize the search location
