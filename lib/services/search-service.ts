@@ -327,12 +327,13 @@ export class SearchService extends EventEmitter {
     }
   }
 
-  private async processEventPage(eventId: string, source: string, url: string) {
+  private async processEventPage(eventId: string, source: string, url: string, html?: string) {
     try {
       this.emit('status', `Processing event page from ${source}...`);
       
-      const html = await webReaderService.fetchPage(url);
-      const result = await this.parseEventPage(html, source, eventId);
+      // Only fetch HTML if not provided
+      const pageHtml = html || await webReaderService.fetchPage(url);
+      const result = await this.parseEventPage(pageHtml, source, eventId);
       
       if (result?.tickets?.length) {
         try {
@@ -637,18 +638,18 @@ export class SearchService extends EventEmitter {
                 for (const searchTerm of uniqueSearchTerms) {
                   if (foundMatches) break;
 
-                 const searchUrl = service === 'stubhub' ?
+                  const searchUrl = service === 'stubhub' ?
                     `https://www.stubhub.com/secure/search?q=${encodeURIComponent(searchTerm)}+${encodeURIComponent(locationTerm)}` :
                     `https://www.vividseats.com/search?searchTerm=${encodeURIComponent(searchTerm)}${locationTerm ? '+' + encodeURIComponent(locationTerm) : ''}`;
-                  
-                  
+                    
                   console.log(`Searching ${service} with term: "${searchTerm}"`);
                   const searchHtml = await webReaderService.fetchPage(searchUrl);
                   
-                  // Parse the search results
+                  // Parse the search results using the already fetched HTML
                   const searchResults = await this.searchSite(searchUrl, service, {
                     keyword: searchTerm,
-                    location: locationTerm
+                    location: locationTerm,
+                    html: searchHtml  // Pass the HTML we already have
                   });
 
                   if (searchResults.length > 0) {
@@ -670,18 +671,17 @@ export class SearchService extends EventEmitter {
                         }
 
                         // Check date proximity (within 2 hours)
-                        const resultDate = new Date(result.date.replace(/(\d+)(?:st|nd|rd|th)/, '$1'));
+                        const resultDate = new Date(result.date);
                         const eventDate = new Date(bestEvent.date);
                         
-                        // Set hours to 0 for both dates before comparing
-                        resultDate.setHours(0, 0, 0, 0);
-                        const compareDate = new Date(eventDate);
-                        compareDate.setHours(0, 0, 0, 0);
+                        // Set both dates to UTC midnight for comparison
+                        resultDate.setUTCHours(0, 0, 0, 0);
+                        eventDate.setUTCHours(0, 0, 0, 0);
                         
-                        const dateMatch = resultDate.getTime() === compareDate.getTime();
+                        const dateMatch = resultDate.getTime() === eventDate.getTime();
                         
                         if (!dateMatch) {
-                          console.log(`Date mismatch: "${result.date}" (${resultDate.toISOString()}) vs "${bestEvent.date}" (${compareDate.toISOString()})`);
+                          console.log(`Date mismatch: "${result.date}" (${resultDate.toISOString()}) vs "${bestEvent.date}" (${eventDate.toISOString()})`);
                           continue;
                         }
 
@@ -705,7 +705,7 @@ export class SearchService extends EventEmitter {
                         }
 
                         // Process tickets for this match and stop searching
-                        await this.processEventPage(savedEvent.id, service, result.url);
+                        await this.processEventPage(savedEvent.id, service, result.url, searchHtml);
                         foundMatches = true;
                         break;
                       } catch (error) {
@@ -715,7 +715,10 @@ export class SearchService extends EventEmitter {
                     }
 
                     // If we found and processed a match, stop searching with other terms
-                    if (foundMatches) break;
+                    if (foundMatches) {
+                      console.log('Match found and processed, skipping remaining search terms');
+                      break;
+                    }
                   }
                 }
 
@@ -805,82 +808,70 @@ export class SearchService extends EventEmitter {
     }
   }
 
-  private async searchSite(url: string, source: string, params: { keyword: string; location?: string }): Promise<EventData[]> {
+  private async searchSite(url: string, source: string, params: { keyword: string; location?: string; html?: string }): Promise<EventData[]> {
     this.emit('status', `Searching ${source}...`);
-    console.log(`Fetching URL: ${url}`);
     
     try {
-      // Get HTML from Jina Reader
-      const html = await webReaderService.fetchPage(url);
+      // Get HTML from Jina Reader only if not provided
+      const html = params.html || await webReaderService.fetchPage(url);
       console.log(`Received HTML from ${source} (${html.length} bytes)`);
 
-      try {
-        const response = await hf.textGeneration({
-          model: 'mistralai/Mistral-7B-Instruct-v0.2',
-          inputs: `<s>[INST]Extract events from HTML as JSON array. Format: [{"name":"event name","venue":"venue name","date":"YYYY-MM-DD","city":"city name","state":"ST","country":"US","url":"url path"}]. Return only JSON array.
+      const response = await hf.textGeneration({
+        model: 'mistralai/Mistral-7B-Instruct-v0.2',
+        inputs: `<s>[INST]Extract events from HTML as JSON array. Format: [{"name":"event name","venue":"venue name","date":"YYYY-MM-DD","city":"city name","state":"ST","country":"US","url":"url path"}]. Return only JSON array.
 
 ${html}[/INST]</s>`,
-          parameters: {
-            max_new_tokens: 1000,
-            temperature: 0.1,
-            do_sample: false,
-            stop: ["</s>", "[INST]"]
-          }
-        });
-
-        console.log(`Chunk response:`, response.generated_text);
-
-        let eventsData: any[];
-        try {
-          // Find the last occurrence of a JSON array (after the HTML)
-          const lastJsonMatch = response.generated_text.split('</body></html>')[1]?.match(/\[\s*{[\s\S]*}\s*\]/);
-          const cleanedResponse = lastJsonMatch ? lastJsonMatch[0] : '[]';
-          console.log('Cleaned response:', cleanedResponse);
-          const parsed = JSON.parse(cleanedResponse);
-          eventsData = Array.isArray(parsed) ? parsed : [parsed];
-          console.log('Parsed event data:', eventsData);
-        } catch (e) {
-          console.error('Failed to parse HF response:', e);
-          return [];
+        parameters: {
+          max_new_tokens: 1000,
+          temperature: 0.1,
+          do_sample: false,
+          stop: ["</s>", "[INST]"]
         }
+      });
 
-        // Filter and convert events to EventData format
-        const events = eventsData
-          .filter(eventData => {
-            // Skip obvious auxiliary events by checking venue
-            if (eventData.venue.toLowerCase().includes('parking')) {
-              return false;
-            }
+      console.log(`Chunk response:`, response.generated_text);
 
-            const normalizedEventName = normalizeEventName(eventData.name);
-            const normalizedKeyword = normalizeEventName(params.keyword);
-            
-            // Check if either name contains the other
-            return normalizedEventName.includes(normalizedKeyword) || 
-                   normalizedKeyword.includes(normalizedEventName);
-          })
-          .map(eventData => ({
-            name: eventData.name, // Keep the original event name instead of using the keyword
-            venue: eventData.venue,
-            date: eventData.date,
-            location: {
-              city: eventData.city,
-              state: eventData.state,
-              country: eventData.country || 'US'
-            },
-            source,
-            url: eventData.url.startsWith('http') ? eventData.url : 
-                 source === 'vividseats' ? `https://www.vividseats.com${eventData.url}` :
-                 `https://www.stubhub.com${eventData.url}`,
-            tickets: [] as TicketData[]
-          }));
+      let eventsData: any[];
+      // Find the last occurrence of a JSON array (after the HTML)
+      const lastJsonMatch = response.generated_text.split('</body></html>')[1]?.match(/\[\s*{[\s\S]*}\s*\]/);
+      const cleanedResponse = lastJsonMatch ? lastJsonMatch[0] : '[]';
+      console.log('Cleaned response:', cleanedResponse);
+      const parsed = JSON.parse(cleanedResponse);
+      eventsData = Array.isArray(parsed) ? parsed : [parsed];
+      console.log('Parsed event data:', eventsData);
 
-        return events;
+      // Filter and convert events to EventData format
+      const events = eventsData
+        .filter(eventData => {
+          // Skip obvious auxiliary events by checking venue
+          if (eventData.venue.toLowerCase().includes('parking')) {
+            return false;
+          }
 
-      } catch (error) {
-        console.error('HF API error:', error);
-        return [];
-      }
+          const normalizedEventName = normalizeEventName(eventData.name);
+          const normalizedKeyword = normalizeEventName(params.keyword);
+          
+          // Check if either name contains the other
+          return normalizedEventName.includes(normalizedKeyword) || 
+                 normalizedKeyword.includes(normalizedEventName);
+        })
+        .map(eventData => ({
+          name: eventData.name,
+          venue: eventData.venue,
+          date: eventData.date,
+          location: {
+            city: eventData.city,
+            state: eventData.state,
+            country: eventData.country || 'US'
+          },
+          source,
+          url: eventData.url.startsWith('http') ? eventData.url : 
+               source === 'vividseats' ? `https://www.vividseats.com${eventData.url}` :
+               `https://www.stubhub.com${eventData.url}`,
+          tickets: [] as TicketData[]
+        }));
+
+      return events;
     } catch (error) {
       console.error(`Error searching ${source}:`, error);
       return [];
@@ -1065,6 +1056,7 @@ ${wrappedHtml}[/INST]</s>`,
       }
 
       // Use existing logic for small HTML or non-VividSeats sources
+      // Use existing logic for small HTML or non-VividSeats sources
       const prompt = source === 'vividseats' ?
         `<s>[INST]Extract ticket listings from HTML as JSON array. Each ticket should be a JSON object with these fields:
 - section: The section name (e.g. "GA", "Floor", "Balcony")
@@ -1112,7 +1104,7 @@ ${html}[/INST]</s>`;
       try {
         // Extract JSON array from response
         const responseText = response.generated_text.split('[/INST]</s>')[1];
-        console.log('Raw response text:', responseText);
+        console.log('Raw response text:', response.generated_text);
 
         // Clean up the response text
         const cleanedResponse = responseText
