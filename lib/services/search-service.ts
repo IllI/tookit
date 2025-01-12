@@ -595,13 +595,10 @@ export class SearchService extends EventEmitter {
             console.error('Error saving event links:', linkError);
           }
 
-          // After finding Google search results, check for Ticketmaster links
-          const ticketmasterLink = Array.from(allTicketLinks.values())
-            .find(link => link.source === 'ticketmaster');
-
-          if (ticketmasterLink) {
-            console.log('Found Ticketmaster link:', ticketmasterLink.url);
-            await this.processTicketmasterEvent(savedEvent.id, ticketmasterLink.url);
+          // Process Ticketmaster links first
+          const ticketmasterLinks = eventLinks.filter(link => link.source === 'ticketmaster');
+          for (const tmLink of ticketmasterLinks) {
+            await this.processTicketmasterEvent(savedEvent.id, tmLink.url, bestEvent);
           }
 
           // Continue with other ticket sources
@@ -1275,87 +1272,88 @@ ${html}[/INST]</s>`;
     return calculateJaroWinklerSimilarity(venue1Norm, venue2Norm) > 0.9;
   }
 
-  private async processTicketmasterEvent(eventId: string, url: string) {
+  private async processTicketmasterEvent(eventId: string, url: string, event: Event) {
     try {
-      // Extract the Ticketmaster event ID from the URL - handle both formats
-      const tmEventId = url.match(/event\/([A-Z0-9]+)|\/([A-Z0-9]{16}$)/)?.[1] || url.match(/\/([A-Z0-9]{16})$/)?.[1];
-      if (!tmEventId) {
-        console.error('Could not extract Ticketmaster event ID from URL:', url);
-        return;
-      }
-
-      // Remove venue prefix if present (first 4 characters)
-      const eventId = tmEventId.length > 12 ? tmEventId.slice(4) : tmEventId;
-      console.log('Extracted Ticketmaster event ID:', eventId);
-
-      // Call Ticketmaster Discovery API v2 for US events
       const consumerKey = process.env.TICKETMASTER_API_KEY;
       if (!consumerKey) {
-        console.error('Available env vars:', Object.keys(process.env));
-        throw new Error('Ticketmaster Consumer Key not found in environment variables. Please ensure CONSUMER_KEY is set in .env');
+        throw new Error('Ticketmaster API key not found in environment variables');
       }
 
-      // First search for the event to get the correct Discovery API ID
-      const searchResponse = await fetch(
-        `https://app.ticketmaster.com/discovery/v2/events.json?apikey=${consumerKey}&keyword=${encodeURIComponent(tmEventId)}`
-      );
-
-      if (!searchResponse.ok) {
-        const responseText = await searchResponse.text();
-        throw new Error(`Ticketmaster API error: ${searchResponse.statusText} (${searchResponse.status})\nResponse: ${responseText}`);
-      }
-
-      const searchData = await searchResponse.json();
-      console.log('Ticketmaster search response:', searchData);
-
-      if (!searchData._embedded?.events?.length) {
-        console.log('No events found in Ticketmaster search');
+      if (!event.location) {
+        console.error('Event location not found');
         return;
       }
 
-      // Use the first matching event
-      const tmEvent = searchData._embedded.events[0];
-      console.log('Found Ticketmaster event:', tmEvent);
+      // Search for the event using the Discovery API
+      const searchUrl = `https://app.ticketmaster.com/discovery/v2/events.json?apikey=${consumerKey}&keyword=${encodeURIComponent(event.name)}&city=${encodeURIComponent(event.location.city)}&stateCode=${event.location.state}&sort=date,asc`;
+      console.log('Searching Ticketmaster events:', searchUrl.replace(consumerKey, '***'));
 
-      // Extract ticket prices from the response
-      const tickets: TicketData[] = [];
-      
-      if (tmEvent.priceRanges) {
-        for (const priceRange of tmEvent.priceRanges) {
-          const price = parseFloat(priceRange.min);
-          if (isNaN(price)) continue;
-          
-          tickets.push({
-            section: priceRange.type || 'General',
+      const searchResponse = await fetch(searchUrl);
+      if (!searchResponse.ok) {
+        throw new Error(`Ticketmaster API error: ${searchResponse.status} ${searchResponse.statusText}`);
+      }
+
+      const searchResults = await searchResponse.json();
+      if (!searchResults._embedded?.events?.length) {
+        console.log('No events found for search');
+        return;
+      }
+
+      // Find the event that matches our venue and date
+      const eventDate = new Date(event.date);
+      const matchingEvent = searchResults._embedded.events.find((e: any) => {
+        const venueMatch = e._embedded?.venues?.[0]?.name?.toLowerCase() === event.venue.toLowerCase();
+        const eventDateTime = new Date(e.dates.start.dateTime);
+        const dateMatch = Math.abs(eventDateTime.getTime() - eventDate.getTime()) < 24 * 60 * 60 * 1000; // Within 24 hours
+        return venueMatch && dateMatch;
+      });
+
+      if (!matchingEvent) {
+        console.log('No matching event found');
+        return;
+      }
+
+      // Get the full event details including price ranges
+      const eventUrl = `https://app.ticketmaster.com/discovery/v2/events/${matchingEvent.id}?apikey=${consumerKey}`;
+      console.log('Fetching Ticketmaster event:', eventUrl.replace(consumerKey, '***'));
+
+      const response = await fetch(eventUrl);
+      if (!response.ok) {
+        throw new Error(`Ticketmaster API error: ${response.status} ${response.statusText}`);
+      }
+
+      const tmEvent = await response.json();
+      console.log('Got Ticketmaster event:', tmEvent);
+
+      if (tmEvent.priceRanges?.length) {
+        const tickets = tmEvent.priceRanges.flatMap((range: any) => ([
+          {
+            section: `${range.type || 'General'} - Minimum`,
             row: 'GA',
-            price: price,
-            quantity: '1+',
+            price: range.min,
+            quantity: 1,
             source: 'ticketmaster',
-            listing_id: `${tmEventId}-${priceRange.type || 'general'}`,
-            ticket_url: url
-          });
-        }
-      }
+            listing_id: `${matchingEvent.id}-${range.type || 'general'}-min`,
+            ticket_url: tmEvent.url || matchingEvent.url
+          },
+          {
+            section: `${range.type || 'General'} - Maximum`,
+            row: 'GA',
+            price: range.max,
+            quantity: 1,
+            source: 'ticketmaster',
+            listing_id: `${matchingEvent.id}-${range.type || 'general'}-max`,
+            ticket_url: tmEvent.url || matchingEvent.url
+          }
+        ]));
 
-      // Save tickets to database
-      if (tickets.length > 0) {
-        const { error } = await this.supabase
-          .from('tickets')
-          .insert(tickets.map(ticket => ({
-            ...ticket,
-            event_id: eventId
-          })));
-
-        if (error) {
-          console.error('Error saving Ticketmaster tickets:', error);
-        }
+        console.log('Saving tickets:', tickets);
+        await this.saveTickets(eventId, tickets);
       } else {
-        console.log('No ticket prices found in Ticketmaster response');
+        console.log('No price ranges found for event');
       }
-
     } catch (error) {
       console.error('Error processing Ticketmaster event:', error);
-      console.error('Full error:', error instanceof Error ? error.stack : error);
     }
   }
 
