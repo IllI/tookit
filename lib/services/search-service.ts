@@ -1038,19 +1038,19 @@ ${wrappedHtml}[/INST]</s>`,
 
   private async parseEventPage(html: string, source: string, eventId?: string) {
     try {
-      // First check if HTML is small enough to process in one go
-      const estimatedTokens = html.length / 4;
-      const TOKEN_LIMIT = 32000;
+      // More accurate token estimation - HTML characters tend to encode to more tokens
+      const estimatedTokens = Math.ceil(html.length / 2.5); // Conservative estimate
+      const MAX_TOKENS = 22000; // Leave room for max_new_tokens and prompt
 
-      if (source === 'vividseats' && estimatedTokens > TOKEN_LIMIT) {
-        // For large VividSeats HTML, pro cess in chunks
-        console.log('VividSeats HTML exceeds token limit, processing in chunks');
+      if (source === 'vividseats' && estimatedTokens > MAX_TOKENS) {
+        // For large VividSeats HTML, process in chunks
+        console.log(`VividSeats HTML exceeds token limit (${estimatedTokens} estimated tokens), processing in chunks`);
         const $ = cheerio.load(html);
         const ticketElements = $('[data-testid="listings-container"]');
         const elementArray = ticketElements.toArray();
         const CHUNK_SIZE = 10;
 
-        console.log(`Processing ${elementArray.length} tickets in chunks of ${CHUNK_SIZE}`);
+        console.log(`Found ${elementArray.length} ticket elements to process in chunks of ${CHUNK_SIZE}`);
         const tickets = await this.processVividSeatsChunks($, elementArray, 0, CHUNK_SIZE, eventId);
         return { tickets };
       }
