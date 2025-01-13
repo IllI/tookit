@@ -51,13 +51,32 @@ export default async function handler(
     console.log('Starting search with params:', params);
     const result = await searchService.searchAll(params);
 
-    // Send completion event
-    sendEvent({
-      type: 'complete',
-      success: true,
-      tickets: result.data,
-      metadata: result.metadata
-    });
+    // Get complete list of tickets from database using the saved event ID
+    const eventId = result.data[0]?.id;
+    console.log('Found event ID:', eventId);
+    
+    if (eventId) {
+      const allTickets = await searchService.getAllTickets(eventId);
+      console.log(`Retrieved ${allTickets.length} tickets for event ${eventId}`);
+
+      // Send completion event with complete ticket list
+      sendEvent({
+        type: 'complete',
+        success: true,
+        tickets: allTickets,
+        metadata: {
+          sources: Array.from(new Set(allTickets.map(t => t.source)))
+        }
+      });
+    } else {
+      // No event found, return empty result
+      sendEvent({
+        type: 'complete',
+        success: true,
+        tickets: [],
+        metadata: { sources: [] }
+      });
+    }
 
   } catch (error) {
     console.error('API error:', error);

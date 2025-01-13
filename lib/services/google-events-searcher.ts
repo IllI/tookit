@@ -1,5 +1,6 @@
 import { getJson } from 'serpapi';
 import type { Event } from '@/lib/types/schemas';
+import { normalizeDateTime, areDatesMatching, doDateTimesMatch } from '../utils/date-utils';
 
 interface GoogleEventResult {
   title: string;
@@ -45,6 +46,7 @@ interface SearchResult extends Event {
 
 class GoogleEventsSearcher {
   private apiKey: string;
+  private currentSearchResults: SearchResult[] = [];
   private readonly PRIORITY_VENDORS = [
     'ticketmaster',
     'axs',
@@ -62,6 +64,9 @@ class GoogleEventsSearcher {
     try {
       // First try Google Events API with location-aware search
       const eventsResults = await this.searchGoogleEvents(keyword, location);
+      
+      // Store current search results for multiple event detection
+      this.currentSearchResults = eventsResults;
       
       // Also get regular Google search results for additional ticket links
       const searchResults = await this.searchGoogleWeb(keyword, location);
@@ -144,8 +149,11 @@ class GoogleEventsSearcher {
         // Extract ticket links with priority and pricing
         const ticketLinks = this.extractTicketLinks(event.ticket_info);
 
-        // Extract date and time from the when field
-        const dateTime = this.extractDateTime(event.date?.when);
+        // Convert date string to database timestamp
+        let dateTime = '';
+        if (event.date?.when) {
+          dateTime = normalizeDateTime(event.date.when);
+        }
 
         console.log('Processing event:', {
           title: event.title,
@@ -153,7 +161,8 @@ class GoogleEventsSearcher {
           address: event.address,
           location,
           ticketLinks,
-          dateTime
+          originalDate: event.date?.when,
+          convertedDate: dateTime
         });
 
         return {
@@ -299,7 +308,7 @@ class GoogleEventsSearcher {
             // If not an event link, search for event links in the source HTML
             if (ticket.source) {
               const eventLinks = ticket.source.match(/href="(https?:\/\/[^"]*ticketmaster[^"]*\/event\/[A-Z0-9]+[^"]*)"/g) || [];
-              if (eventLinks.length > 0) {
+              if (eventLinks.length > 0 && eventLinks[0]) {
                 // Extract the first event link found
                 const match = eventLinks[0].match(/href="([^"]*)"/);
                 if (match && match[1]) {
@@ -440,86 +449,42 @@ class GoogleEventsSearcher {
     return costs[s2.length];
   }
 
-  private extractDateTime(when?: string): string {
-    if (!when) return '';
-
-    try {
-      // Example formats:
-      // "Today, 6:30 – 8:30 PM"
-      // "Fri, Oct 7, 7 – 8 AM"
-      // "Wed, Jan 24, 7 PM"
-      // "Tomorrow, 8 PM"
-      const parts = when.split(',').map(p => p.trim());
-      
-      // Get the date part
-      let date = new Date();
-      const firstPart = parts[0].toLowerCase();
-      
-      if (firstPart === 'today') {
-        // Use current date
-      } else if (firstPart === 'tomorrow') {
-        date.setDate(date.getDate() + 1);
-      } else if (parts.length >= 2) {
-        // Format: "Wed, Jan 24" or "Fri, Oct 7"
-        const monthDay = parts[1].trim().split(' ');
-        const month = monthDay[0];  // Jan, Feb, etc.
-        const day = parseInt(monthDay[1] || '1');
-        
-        // Create a new date with the specified month and day
-        const months = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
-        const monthIndex = months.indexOf(month.toLowerCase().substring(0, 3));
-        
-        if (monthIndex === -1) {
-          console.warn('Invalid month in date:', when);
-          return '';
-        }
-        
-        date.setMonth(monthIndex);
-        date.setDate(day);
-        
-        // If the resulting date is in the past, add a year
-        if (date < new Date()) {
-          date.setFullYear(date.getFullYear() + 1);
-        }
-      } else {
-        console.warn('Unable to parse date from:', when);
-        return '';
-      }
-
-      // Get the time part (last part)
-      const timePart = parts[parts.length - 1];
-      const timeMatch = timePart.match(/(\d+)(?::(\d+))?\s*(AM|PM)/i);
-      
-      if (timeMatch) {
-        const [_, hours, minutes = '00', meridiem] = timeMatch;
-        const hour24 = parseInt(hours) + (meridiem.toLowerCase() === 'pm' && hours !== '12' ? 12 : 0);
-        date.setHours(hour24, parseInt(minutes), 0, 0);
-      } else {
-        // If no time specified, set to midnight
-        date.setHours(0, 0, 0, 0);
-      }
-
-      return date.toISOString();
-    } catch (error) {
-      console.error('Error parsing date:', when, error);
-      return '';
-    }
-  }
-
-  private isMatchingEvent(event1: SearchResult, name2: string, venue2?: string): boolean {
+  private isMatchingEvent(event1: SearchResult, name2: string, venue2?: string, date2?: string): boolean {
     // Compare event names
     const name1Norm = this.normalizeEventName(event1.name);
     const name2Norm = this.normalizeEventName(name2);
     const nameMatch = name1Norm.includes(name2Norm) || name2Norm.includes(name1Norm);
     
-    // If venues are available, compare them too
-    if (event1.venue && venue2) {
-      const venue1Norm = this.normalizeEventName(event1.venue);
-      const venue2Norm = this.normalizeEventName(venue2);
-      return nameMatch && (venue1Norm.includes(venue2Norm) || venue2Norm.includes(venue1Norm));
+    if (!nameMatch || !date2 || !event1.date) {
+      return nameMatch;
     }
+
+    // Check if dates match
+    if (!areDatesMatching(event1.date, date2)) {
+      return false;
+    }
+
+    // If we have multiple events for this artist/venue on this day,
+    // we need to match the time as well
+    const multipleEvents = this.hasMultipleEventsOnDay(event1.name, event1.venue, new Date(event1.date));
     
-    return nameMatch;
+    if (multipleEvents) {
+      return doDateTimesMatch(event1.date, date2);
+    }
+
+    // Single event that day - dates match
+    return true;
+  }
+
+  private hasMultipleEventsOnDay(artistName: string, venue: string, date: Date): boolean {
+    const eventsOnDay = this.currentSearchResults.filter((event: SearchResult) => {
+      if (!event.date) return false;
+      return event.name === artistName &&
+             event.venue === venue &&
+             areDatesMatching(event.date, date);
+    });
+
+    return eventsOnDay.length > 1;
   }
 
   private normalizeEventName(name: string): string {
@@ -528,6 +493,80 @@ class GoogleEventsSearcher {
       .replace(/[^a-z0-9\s]/g, '') // Remove special characters
       .replace(/\s+/g, ' ')        // Normalize spaces
       .trim();
+  }
+
+  private getTimezoneFromLocation(city: string, state: string): string {
+    // Map of US states to their primary timezone
+    const stateTimezones: Record<string, string> = {
+      'AK': 'America/Anchorage',
+      'AL': 'America/Chicago',
+      'AR': 'America/Chicago',
+      'AZ': 'America/Phoenix',
+      'CA': 'America/Los_Angeles',
+      'CO': 'America/Denver',
+      'CT': 'America/New_York',
+      'DC': 'America/New_York',
+      'DE': 'America/New_York',
+      'FL': 'America/New_York',
+      'GA': 'America/New_York',
+      'HI': 'Pacific/Honolulu',
+      'IA': 'America/Chicago',
+      'ID': 'America/Boise',
+      'IL': 'America/Chicago',
+      'IN': 'America/Indiana/Indianapolis',
+      'KS': 'America/Chicago',
+      'KY': 'America/New_York',
+      'LA': 'America/Chicago',
+      'MA': 'America/New_York',
+      'MD': 'America/New_York',
+      'ME': 'America/New_York',
+      'MI': 'America/Detroit',
+      'MN': 'America/Chicago',
+      'MO': 'America/Chicago',
+      'MS': 'America/Chicago',
+      'MT': 'America/Denver',
+      'NC': 'America/New_York',
+      'ND': 'America/Chicago',
+      'NE': 'America/Chicago',
+      'NH': 'America/New_York',
+      'NJ': 'America/New_York',
+      'NM': 'America/Denver',
+      'NV': 'America/Los_Angeles',
+      'NY': 'America/New_York',
+      'OH': 'America/New_York',
+      'OK': 'America/Chicago',
+      'OR': 'America/Los_Angeles',
+      'PA': 'America/New_York',
+      'RI': 'America/New_York',
+      'SC': 'America/New_York',
+      'SD': 'America/Chicago',
+      'TN': 'America/Chicago',
+      'TX': 'America/Chicago',
+      'UT': 'America/Denver',
+      'VA': 'America/New_York',
+      'VT': 'America/New_York',
+      'WA': 'America/Los_Angeles',
+      'WI': 'America/Chicago',
+      'WV': 'America/New_York',
+      'WY': 'America/Denver'
+    };
+
+    // Special cases for cities that are in different timezones than their state's primary timezone
+    const cityOverrides: Record<string, string> = {
+      'Michigan City': 'America/Chicago', // IN
+      'Tell City': 'America/Chicago',     // IN
+      'Starke': 'America/Chicago',        // FL
+      'Gulf': 'America/Chicago',          // FL
+      'Bay': 'America/Chicago'            // FL
+    };
+
+    // Check for city override first
+    if (cityOverrides[city]) {
+      return cityOverrides[city];
+    }
+
+    // Fall back to state timezone, defaulting to Eastern if not found
+    return stateTimezones[state] || 'America/New_York';
   }
 }
 

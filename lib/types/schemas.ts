@@ -36,4 +36,5 @@ export interface TicketSource {
 export interface SearchMetadata {
   sources: string[];
   error?: string;
+  eventId?: string;
 }

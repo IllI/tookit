@@ -1,11 +1,12 @@
 import { EventEmitter } from 'events';
 import { HfInference } from '@huggingface/inference';
 import type { SearchParams, SearchResult } from '../types/api';
-import type { Event, TicketData, EventData, SearchMetadata } from '@/lib/types/schemas';
+import type { Event, TicketData, EventData } from '@/lib/types/schemas';
 import { createClient } from '@supabase/supabase-js';
 import { config } from '@/src/config/env';
 import GoogleEventsSearcher from '../services/google-events-searcher';
 import { webReaderService } from './parsehub-service';
+import { normalizeDateTime, areDatesMatching, doDateTimesMatch, isValidDate } from '../utils/date-utils';
 import * as cheerio from 'cheerio';
 
 // Initialize HuggingFace client
@@ -63,6 +64,11 @@ interface GoogleSearchResult {
     url: string;
     is_primary: boolean;
   }>;
+}
+
+interface SearchMetadata {
+  sources: string[];
+  eventId?: string;
 }
 
 export class SearchService extends EventEmitter {
@@ -517,9 +523,29 @@ export class SearchService extends EventEmitter {
         // Initialize ticket links collection
         const allTicketLinks = new Map<string, { source: string; url: string }>();
         
+        // Helper function to validate ticket vendor URLs
+        const isValidEventUrl = (url: string, source: string) => {
+          if (source === 'stubhub') {
+            // StubHub event URLs contain /event/ or end with a numeric event ID
+            return /\/event\/|\/[0-9]+$/.test(url);
+          }
+          if (source === 'vividseats') {
+            // VividSeats event URLs contain /tickets/ but not /search?
+            return url.includes('/tickets/') && !url.includes('/search?');
+          }
+          return true; // Other sources like Ticketmaster are handled separately
+        };
+        
         // Collect ticket links from best event
         bestEvent.ticket_links?.forEach(link => {
           if (!link.source || !link.url) return;
+          
+          // Only add valid event URLs for StubHub and VividSeats
+          if (!isValidEventUrl(link.url, link.source)) {
+            console.log(`Skipping invalid ${link.source} URL: ${link.url}`);
+            return;
+          }
+          
           const key = `${link.source}-${link.url}`;
           allTicketLinks.set(key, {
             source: link.source,
@@ -532,6 +558,13 @@ export class SearchService extends EventEmitter {
           if (event !== bestEvent) {
             event.ticket_links?.forEach(link => {
               if (!link.source || !link.url) return;
+              
+              // Only add valid event URLs for StubHub and VividSeats
+              if (!isValidEventUrl(link.url, link.source)) {
+                console.log(`Skipping invalid ${link.source} URL: ${link.url}`);
+                return;
+              }
+              
               const key = `${link.source}-${link.url}`;
               allTicketLinks.set(key, {
                 source: link.source,
@@ -548,7 +581,8 @@ export class SearchService extends EventEmitter {
           .from('events')
           .upsert({
             name: bestEvent.name,
-            date: bestEvent.date,
+            // Use the date from the event, but ensure it's in YYYY-MM-DD format
+            date: bestEvent.date.split('T')[0],  // This will give us 2025-01-17
             venue: bestEvent.venue,
             city: bestEvent.location.city,
             state: bestEvent.location.state,
@@ -609,13 +643,13 @@ export class SearchService extends EventEmitter {
               const serviceLink = Array.from(allTicketLinks.values())
                 .find(link => link.source === service);
 
-              if (serviceLink) {
-                // If we have a direct link, process it
+              // If we have a valid direct link, process it
+              if (serviceLink && isValidEventUrl(serviceLink.url, service)) {
                 console.log(`Processing ${service} event page from direct link:`, serviceLink.url);
                 await this.processEventPage(savedEvent.id, service, serviceLink.url);
               } else {
-                // If no direct link, we need to search the service
-                console.log(`No direct ${service} link found, searching ${service} for event match`);
+                // If no valid direct link, we need to search the service
+                console.log(`No valid ${service} event link found, searching ${service} for event match`);
                 
                 // Create search terms that combine both the keyword and best event name
                 const searchTerms = [
@@ -670,25 +704,40 @@ export class SearchService extends EventEmitter {
                           continue;
                         }
 
-                        // Check date proximity (within 2 hours)
-                        const resultDate = new Date(result.date);
-                        const eventDate = new Date(bestEvent.date);
-                        
-                        // Set both dates to UTC midnight for comparison
-                        resultDate.setUTCHours(0, 0, 0, 0);
-                        eventDate.setUTCHours(0, 0, 0, 0);
-                        
-                        const dateMatch = resultDate.getTime() === eventDate.getTime();
-                        
-                        if (!dateMatch) {
-                          console.log(`Date mismatch: "${result.date}" (${resultDate.toISOString()}) vs "${bestEvent.date}" (${eventDate.toISOString()})`);
+                        // Check date proximity
+                        const resultDate = normalizeDateTime(result.date);
+                        const eventDate = normalizeDateTime(bestEvent.date);
+
+                        if (!resultDate || !eventDate) {
+                          console.log(`Invalid date format: "${result.date}" or "${bestEvent.date}"`);
+                          continue;
+                        }
+
+                        // First check if they're on the same day
+                        if (!areDatesMatching(resultDate, eventDate)) {
+                          console.log(`Date mismatch: "${resultDate}" vs "${eventDate}"`);
+                          continue;
+                        }
+
+                        // Check if there are multiple events by this artist at this venue on this day
+                        const multipleEvents = filteredResults.filter(event => {
+                          const otherDate = normalizeDateTime(event.date);
+                          return event.name === bestEvent.name &&
+                                 event.venue === bestEvent.venue &&
+                                 areDatesMatching(otherDate, eventDate);
+                        }).length > 1;
+
+                        // If multiple events, also check the time
+                        if (multipleEvents && !doDateTimesMatch(resultDate, eventDate)) {
+                          console.log(`Time mismatch for multiple events: "${resultDate}" vs "${eventDate}"`);
                           continue;
                         }
 
                         console.log(`Found matching ${service} event:`, {
-                          resultName: result.name,
-                          venue: result.venue,
-                          date: result.date
+                            resultName: result.name,
+                            venue: result.venue,
+                            date: result.date,
+                            multipleEvents
                         });
 
                         // Save the event link first
@@ -759,34 +808,38 @@ export class SearchService extends EventEmitter {
               )
             )
           `)
-          .in('event_id', googleResults.filter(event => event.id).map(event => event.id!))
+          .eq('event_id', savedEvent.id)  // Use the ID of the event we just created
           .order('price');
 
-        const formattedTickets = savedTickets?.map((ticket: any) => ({
-          id: ticket.id,
-          name: ticket.event.name,
-          date: ticket.event.date,
-          venue: ticket.event.venue,
+        // Create a single event object with tickets
+        const eventWithTickets = {
+          id: savedEvent.id,
+          name: savedEvent.name,
+          date: savedEvent.date,
+          venue: savedEvent.venue,
           location: {
-            city: ticket.event.city,
-            state: ticket.event.state,
-            country: ticket.event.country
+            city: savedEvent.city,
+            state: savedEvent.state,
+            country: savedEvent.country
           },
-          tickets: [],
-          price: parseFloat(ticket.price.toString()),
-          section: ticket.section,
-          row: ticket.row || '',
-          quantity: parseInt(ticket.quantity.toString()),
-          source: ticket.source,
-          listing_id: ticket.listing_id,
-          ticket_url: ticket.ticket_url
-        })) || [];
+          tickets: savedTickets?.map((ticket: any) => ({
+            id: ticket.id,
+            price: parseFloat(ticket.price.toString()),
+            section: ticket.section,
+            row: ticket.row || '',
+            quantity: parseInt(ticket.quantity.toString()),
+            source: ticket.source,
+            listing_id: ticket.listing_id,
+            ticket_url: ticket.ticket_url
+          })) || []
+        };
 
         return {
           success: true,
-          data: formattedTickets,
+          data: [eventWithTickets],  // Return array with single event containing all tickets
           metadata: {
-            sources: Array.from(new Set(formattedTickets.map(t => t.source)))
+            sources: Array.from(new Set(savedTickets?.map(t => t.source) || [])),
+            eventId: savedEvent.id
           }
         };
       }
@@ -1370,6 +1423,137 @@ ${html}[/INST]</s>`;
       return currentScore > bestScore ? current : best;
     }, events[0]);
   }
+
+  // Public method to get all tickets for an event
+  async getAllTickets(eventId: string) {
+    const { data: tickets, error } = await this.supabase
+      .from('tickets')
+      .select(`
+        id,
+        event_id,
+        section,
+        row,
+        price,
+        quantity,
+        source,
+        listing_id,
+        ticket_url,
+        event:events (
+          id,
+          name,
+          date,
+          venue,
+          city,
+          state,
+          country,
+          event_links (
+            source,
+            url
+          )
+        )
+      `)
+      .eq('event_id', eventId)
+      .order('price');
+
+    if (error) {
+      console.error('Error fetching tickets:', error);
+      return [];
+    }
+
+    return tickets?.map(ticket => ({
+      id: ticket.id,
+      event_id: ticket.event_id,
+      name: ticket.event.name,
+      date: ticket.event.date,
+      venue: ticket.event.venue,
+      location: {
+        city: ticket.event.city,
+        state: ticket.event.state,
+        country: ticket.event.country
+      },
+      price: parseFloat(ticket.price.toString()),
+      section: ticket.section,
+      row: ticket.row || '',
+      quantity: parseInt(ticket.quantity.toString()),
+      source: ticket.source,
+      listing_id: ticket.listing_id,
+      ticket_url: ticket.ticket_url
+    })) || [];
+  }
+
+  private getTimezoneFromLocation(city: string, state: string): string {
+    // Map of US states to their primary timezone
+    const stateTimezones: Record<string, string> = {
+      'AK': 'America/Anchorage',
+      'AL': 'America/Chicago',
+      'AR': 'America/Chicago',
+      'AZ': 'America/Phoenix',
+      'CA': 'America/Los_Angeles',
+      'CO': 'America/Denver',
+      'CT': 'America/New_York',
+      'DC': 'America/New_York',
+      'DE': 'America/New_York',
+      'FL': 'America/New_York',
+      'GA': 'America/New_York',
+      'HI': 'Pacific/Honolulu',
+      'IA': 'America/Chicago',
+      'ID': 'America/Boise',
+      'IL': 'America/Chicago',
+      'IN': 'America/Indiana/Indianapolis',
+      'KS': 'America/Chicago',
+      'KY': 'America/New_York',
+      'LA': 'America/Chicago',
+      'MA': 'America/New_York',
+      'MD': 'America/New_York',
+      'ME': 'America/New_York',
+      'MI': 'America/Detroit',
+      'MN': 'America/Chicago',
+      'MO': 'America/Chicago',
+      'MS': 'America/Chicago',
+      'MT': 'America/Denver',
+      'NC': 'America/New_York',
+      'ND': 'America/Chicago',
+      'NE': 'America/Chicago',
+      'NH': 'America/New_York',
+      'NJ': 'America/New_York',
+      'NM': 'America/Denver',
+      'NV': 'America/Los_Angeles',
+      'NY': 'America/New_York',
+      'OH': 'America/New_York',
+      'OK': 'America/Chicago',
+      'OR': 'America/Los_Angeles',
+      'PA': 'America/New_York',
+      'RI': 'America/New_York',
+      'SC': 'America/New_York',
+      'SD': 'America/Chicago',
+      'TN': 'America/Chicago',
+      'TX': 'America/Chicago',
+      'UT': 'America/Denver',
+      'VA': 'America/New_York',
+      'VT': 'America/New_York',
+      'WA': 'America/Los_Angeles',
+      'WI': 'America/Chicago',
+      'WV': 'America/New_York',
+      'WY': 'America/Denver'
+    };
+
+    // Special cases for cities that are in different timezones than their state's primary timezone
+    const cityOverrides: Record<string, string> = {
+      'Michigan City': 'America/Chicago', // IN
+      'Tell City': 'America/Chicago',     // IN
+      'Starke': 'America/Chicago',        // FL
+      'Gulf': 'America/Chicago',          // FL
+      'Bay': 'America/Chicago'            // FL
+    };
+
+    // Check for city override first
+    if (cityOverrides[city]) {
+      return cityOverrides[city];
+    }
+
+    // Fall back to state timezone, defaulting to Eastern if not found
+    return stateTimezones[state] || 'America/New_York';
+  }
 }
 
 // Helper functions
@@ -1444,5 +1628,5 @@ function calculateJaroWinklerSimilarity(s1: string, s2: string): number {
   const winklerModification = 0.1; // Standard scaling factor
   return jaroSimilarity + (commonPrefix * winklerModification * (1 - jaroSimilarity));
 }
-
 export const searchService = new SearchService();
+
