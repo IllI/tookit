@@ -192,7 +192,7 @@ export class SearchService extends EventEmitter {
         quantity: parseInt(ticket.quantity?.toString() || '1'),
         source: ticket.source,
         listing_id: ticket.listing_id || crypto.randomUUID(),
-        ticket_url: ticket.ticket_url,
+        ticket_url: ticket.source === 'vividseats' ? ticket.ticket_url : null,
         created_at: new Date().toISOString()
       }));
 
@@ -1135,7 +1135,7 @@ ${html}[/INST]</s>` :
 - ticket_url: The href attribute from the anchor tag
 
 Example output:
-[{"section":"Floor GA","row":"GA","price":123.45,"quantity":"2","source":"stubhub","listing_id":"123456","ticket_url":"https://www.stubhub.com/..."}]
+[{"section":"Floor GA","row":"GA","price":123.45,"quantity":"2","source":"stubhub","listing_id":"123456"}]
 
 Return only the JSON array, no explanations.
 
