@@ -306,10 +306,18 @@ export class SearchService extends EventEmitter {
         // Use ticket-specific URL if available, otherwise fall back to event URL
         const ticketUrl = ticket.ticket_url || (eventLink ? eventLink.url : null);
 
+        // Format the date string to remove timezone and preserve local time
+        const dateStr = ticket.event.date.replace(/[+-]\d{2}:?\d{2}$/, '');
+        const [datePart, timePart] = dateStr.split(' ');
+        const [year, month, day] = datePart.split('-').map(Number);
+        const [hours, minutes] = timePart ? timePart.split(':').map(Number) : [0, 0];
+        const localDate = new Date(year, month - 1, day, hours, minutes);
+        const formattedDate = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')} ${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:00`;
+
         return {
           id: ticket.id,
           name: ticket.event.name,
-          date: ticket.event.date,
+          date: formattedDate,
           venue: ticket.event.venue,
           location: {
             city: ticket.event.city,
@@ -1446,7 +1454,7 @@ ${html}[/INST]</s>`;
           city,
           state,
           country,
-          event_links (
+          event_links!inner (
             source,
             url
           )
@@ -1459,26 +1467,33 @@ ${html}[/INST]</s>`;
       console.error('Error fetching tickets:', error);
       return [];
     }
+    return tickets?.map(ticket => {
+      // Find the event link for this ticket's source
+      const eventLink = ticket.event.event_links?.find((link: any) => link.source === ticket.source);
+      
+      // Use ticket-specific URL if available, otherwise fall back to event URL
+      const ticketUrl = ticket.ticket_url || (eventLink ? eventLink.url : null);
 
-    return tickets?.map(ticket => ({
-      id: ticket.id,
-      event_id: ticket.event_id,
-      name: ticket.event.name,
-      date: ticket.event.date,
-      venue: ticket.event.venue,
-      location: {
-        city: ticket.event.city,
-        state: ticket.event.state,
-        country: ticket.event.country
-      },
-      price: parseFloat(ticket.price.toString()),
-      section: ticket.section,
-      row: ticket.row || '',
-      quantity: parseInt(ticket.quantity.toString()),
-      source: ticket.source,
-      listing_id: ticket.listing_id,
-      ticket_url: ticket.ticket_url
-    })) || [];
+      return {
+        id: ticket.id,
+        event_id: ticket.event_id,
+        name: ticket.event.name,
+        date: ticket.event.date,
+        venue: ticket.event.venue,
+        location: {
+          city: ticket.event.city,
+          state: ticket.event.state,
+          country: ticket.event.country
+        },
+        price: parseFloat(ticket.price.toString()),
+        section: ticket.section,
+        row: ticket.row || '',
+        quantity: parseInt(ticket.quantity.toString()),
+        source: ticket.source,
+        listing_id: ticket.listing_id,
+        ticket_url: ticketUrl
+      };
+    }) || [];
   }
 
   private getTimezoneFromLocation(city: string, state: string): string {

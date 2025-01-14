@@ -33,18 +33,24 @@ export default function TicketResults({ results, isLoading, lastUpdated }: Ticke
     if (!dateString) return 'Date TBD';
     
     try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) return 'Date TBD';
+      // Parse the ISO string manually to avoid timezone conversion
+      const match = dateString.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})/);
+      if (!match) return 'Date TBD';
+
+      const [_, year, month, day, hour, minute] = match;
       
-      return date.toLocaleDateString('en-US', {
-        weekday: 'long',
-        year: 'numeric',
-        month: 'long',
-        day: 'numeric',
-        hour: 'numeric',
-        minute: 'numeric'
-      });
-    } catch (e) {
+      // Create the date parts
+      const weekday = new Date(`${year}-${month}-${day}`).toLocaleDateString('en-US', { weekday: 'long' });
+      const monthName = new Date(`${year}-${month}-${day}`).toLocaleDateString('en-US', { month: 'long' });
+      
+      // Format hour for 12-hour clock
+      const hourNum = parseInt(hour);
+      const hour12 = hourNum % 12 || 12;
+      const ampm = hourNum >= 12 ? 'PM' : 'AM';
+
+      return `${weekday}, ${monthName} ${parseInt(day)}, ${year} at ${hour12}:${minute} ${ampm}`;
+    } catch (error) {
+      console.error('Error formatting date:', error);
       return 'Date TBD';
     }
   };
