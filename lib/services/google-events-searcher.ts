@@ -19,6 +19,7 @@ interface SearchResult extends Event {
   link?: string;
   description?: string;
   ticket_links: EventLink[];
+  has_ticketmaster?: boolean;
 }
 
 class GoogleEventsSearcher {
@@ -160,9 +161,17 @@ class GoogleEventsSearcher {
 
     // Create ticket link from the result URL
     const ticketLinks: EventLink[] = [];
+    let hasTicketmaster = false;
+
     if (result.link) {
       const domain = new URL(result.link).hostname.toLowerCase();
       const vendor = this.normalizeVendorName(domain);
+      
+      // Check if this is a Ticketmaster or Live Nation link
+      if (vendor === 'ticketmaster' || vendor === 'livenation') {
+        hasTicketmaster = true;
+      }
+
       if (this.PRIORITY_VENDORS.includes(vendor)) {
         ticketLinks.push({
           source: vendor,
@@ -181,14 +190,16 @@ class GoogleEventsSearcher {
       country: 'US'
     };
 
-    const eventData = {
+    const eventData: SearchResult = {
       name: title,
       date: dateStr ? normalizeDateTime(dateStr) : '',
       venue,
       location,
       description,
       ticket_links: ticketLinks,
-      source: this.determinePrimarySource(ticketLinks)
+      source: this.determinePrimarySource(ticketLinks),
+      has_ticketmaster: hasTicketmaster,
+      link: result.link || ''
     };
 
     // Log the extracted data for debugging
@@ -198,7 +209,9 @@ class GoogleEventsSearcher {
       venue,
       city,
       state,
-      ticketLinks
+      ticketLinks,
+      hasTicketmaster,
+      link: result.link
     });
 
     return eventData;

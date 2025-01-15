@@ -638,10 +638,15 @@ export class SearchService extends EventEmitter {
             console.error('Error saving event links:', linkError);
           }
 
-          // Process Ticketmaster links first
-          const ticketmasterLinks = eventLinks.filter(link => link.source === 'ticketmaster');
-          for (const tmLink of ticketmasterLinks) {
-            await this.processTicketmasterEvent(savedEvent.id, tmLink.url, bestEvent);
+          // Check if the best event has a Ticketmaster/LiveNation link
+          if (bestEvent.has_ticketmaster) {
+            const tmLink = eventLinks.find(link => 
+              link.source === 'ticketmaster' || link.source === 'livenation'
+            );
+            if (tmLink) {
+              console.log('Processing Ticketmaster event from link:', tmLink.url);
+              await this.processTicketmasterEvent(savedEvent.id, tmLink.url, bestEvent);
+            }
           }
 
           // Continue with other ticket sources
@@ -879,8 +884,8 @@ export class SearchService extends EventEmitter {
 
       const response = await hf.textGeneration({
         model: 'mistralai/Mistral-7B-Instruct-v0.2',
-        inputs: `<s>[INST]Extract events from HTML as JSON array. Format: [{"name":"event name","venue":"venue name","date":"YYYY-MM-DD","city":"city name","state":"ST","country":"US","url":"url path"}]. Return only JSON array.
-
+        inputs: `<s>[INST]Extract events from HTML as JSON array. Format: [{"name":"event name","venue":"venue name","date":"YYYY-MM-DD","city":"city name","state":"ST","country":"US","url":"anchor tag href url path"}]. Return only JSON array.
+HTML to extract from:
 ${html}[/INST]</s>`,
         parameters: {
           max_new_tokens: 1000,
@@ -890,7 +895,7 @@ ${html}[/INST]</s>`,
         }
       });
 
-      console.log(`Chunk response:`, response.generated_text);
+      console.log(`Chunk response:`, response.generated_text.split('</body></html>')[1]);
 
       let eventsData: any[];
       // Find the last occurrence of a JSON array (after the HTML)
@@ -905,32 +910,40 @@ ${html}[/INST]</s>`,
       const events = eventsData
         .filter(eventData => {
           // Skip obvious auxiliary events by checking venue
-          if (eventData.venue.toLowerCase().includes('parking')) {
+          if (!eventData || !eventData.venue || eventData.venue.toLowerCase().includes('parking')) {
             return false;
           }
 
-          const normalizedEventName = normalizeEventName(eventData.name);
+          const normalizedEventName = normalizeEventName(eventData.name || '');
           const normalizedKeyword = normalizeEventName(params.keyword);
           
           // Check if either name contains the other
           return normalizedEventName.includes(normalizedKeyword) || 
                  normalizedKeyword.includes(normalizedEventName);
         })
-        .map(eventData => ({
-          name: eventData.name,
-          venue: eventData.venue,
-          date: eventData.date,
-          location: {
-            city: eventData.city,
-            state: eventData.state,
-            country: eventData.country || 'US'
-          },
-          source,
-          url: eventData.url.startsWith('http') ? eventData.url : 
-               source === 'vividseats' ? `https://www.vividseats.com${eventData.url}` :
-               `https://www.stubhub.com${eventData.url}`,
-          tickets: [] as TicketData[]
-        }));
+        .map(eventData => {
+          // Ensure URL is properly formatted
+          let eventUrl = eventData.url || '';
+          if (eventUrl && !eventUrl.startsWith('http')) {
+            eventUrl = source === 'vividseats' 
+              ? `https://www.vividseats.com${eventUrl}`
+              : `https://www.stubhub.com${eventUrl}`;
+          }
+
+          return {
+            name: eventData.name || '',
+            venue: eventData.venue || '',
+            date: eventData.date || '',
+            location: {
+              city: eventData.city || '',
+              state: eventData.state || '',
+              country: eventData.country || 'US'
+            },
+            source,
+            url: eventUrl,
+            tickets: [] as TicketData[]
+          };
+        });
 
       return events;
     } catch (error) {
