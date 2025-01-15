@@ -314,6 +314,10 @@ export class SearchService extends EventEmitter {
         const localDate = new Date(year, month - 1, day, hours, minutes);
         const formattedDate = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')} ${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:00`;
 
+        // Add a label for Ticketmaster/LiveNation tickets
+        const isTicketmaster = ticket.source === 'ticketmaster' || ticket.source === 'livenation';
+        const priceLabel = isTicketmaster ? 'Face value price' : 'Price';
+
         return {
           id: ticket.id,
           name: ticket.event.name,
@@ -327,6 +331,7 @@ export class SearchService extends EventEmitter {
           section: ticket.section,
           row: ticket.row || '',
           price: parseFloat(ticket.price.toString()),
+          price_label: priceLabel,
           quantity: parseInt(ticket.quantity.toString()),
           source: ticket.source,
           listing_id: ticket.listing_id,
@@ -1392,26 +1397,42 @@ ${html}[/INST]</s>`;
       console.log('Got Ticketmaster event:', tmEvent);
 
       if (tmEvent.priceRanges?.length) {
-        const tickets = tmEvent.priceRanges.flatMap((range: any) => ([
-          {
-            section: `${range.type || 'General'} - Minimum`,
-            row: 'GA',
-            price: range.min,
-            quantity: 1,
-            source: 'ticketmaster',
-            listing_id: `${matchingEvent.id}-${range.type || 'general'}-min`,
-            ticket_url: tmEvent.url || matchingEvent.url
-          },
-          {
-            section: `${range.type || 'General'} - Maximum`,
-            row: 'GA',
-            price: range.max,
-            quantity: 1,
-            source: 'ticketmaster',
-            listing_id: `${matchingEvent.id}-${range.type || 'general'}-max`,
-            ticket_url: tmEvent.url || matchingEvent.url
+        const tickets = tmEvent.priceRanges.flatMap((range: any) => {
+          // If min and max are the same, just create one ticket
+          if (range.min === range.max) {
+            return [{
+              section: range.type || 'General',
+              row: 'GA',
+              price: range.min,
+              quantity: 1,
+              source: 'ticketmaster',
+              listing_id: `${matchingEvent.id}-${range.type || 'general'}`,
+              ticket_url: tmEvent.url || matchingEvent.url
+            }];
           }
-        ]));
+          
+          // Otherwise create min and max tickets
+          return [
+            {
+              section: `${range.type || 'General'} - Minimum`,
+              row: 'GA',
+              price: range.min,
+              quantity: 1,
+              source: 'ticketmaster',
+              listing_id: `${matchingEvent.id}-${range.type || 'general'}-min`,
+              ticket_url: tmEvent.url || matchingEvent.url
+            },
+            {
+              section: `${range.type || 'General'} - Maximum`,
+              row: 'GA',
+              price: range.max,
+              quantity: 1,
+              source: 'ticketmaster',
+              listing_id: `${matchingEvent.id}-${range.type || 'general'}-max`,
+              ticket_url: tmEvent.url || matchingEvent.url
+            }
+          ];
+        });
 
         console.log('Saving tickets:', tickets);
         await this.saveTickets(eventId, tickets);
