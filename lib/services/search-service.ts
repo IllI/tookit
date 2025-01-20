@@ -345,19 +345,54 @@ export class SearchService extends EventEmitter {
 
   async processEventPage(eventId: string, source: string, url: string, html?: string): Promise<void> {
     try {
-      const searchResults = await this.searchSite(url, source, { 
-        keyword: '', // We don't need keyword when processing a known event page
-        html,
-        location: '' 
-      });
+      // Get HTML from Jina Reader only if not provided
+      if (!html) {
+        console.log(`Fetching event page from Jina Reader: ${url}`);
+        html = await webReaderService.fetchPage(url);
+      } else {
+        console.log(`Using provided HTML for event page: ${url}`);
+      }
+      console.log(`Processing ${source} event page (${html.length} bytes)`);
 
-      if (searchResults.length > 0) {
-        const event = searchResults[0];
-        // Process tickets for this event
-        // ... implement ticket processing logic here ...
+      // Parse tickets using Gemini
+      const parsedData = await this.parser.parseContent(
+        html,
+        url,
+        { keyword: '', location: '' },
+        true // true indicates this is an event page
+      );
+      console.log('Parsed ticket data:', parsedData);
+
+      interface TicketListing {
+        section: string;
+        row?: string;
+        price: number;
+        quantity: number;
+        listing_id?: string;
+      }
+
+      // Type assertion since we know the response format for ticket pages
+      const ticketData = parsedData as unknown as { tickets: TicketListing[] };
+
+      if (ticketData.tickets?.length) {
+        // Format tickets with source and URL
+        const tickets = ticketData.tickets.map(ticket => ({
+          ...ticket,
+          source,
+          ticket_url: url,
+          listing_id: ticket.listing_id || crypto.randomUUID() // Ensure listing_id is always a string
+        }));
+
+        // Save tickets to database
+        await this.saveTickets(eventId, tickets);
+        
+        // Emit updated tickets
+        await this.emitAllTickets(eventId);
+      } else {
+        console.log(`No tickets found on ${source} event page: ${url}`);
       }
     } catch (error) {
-      console.error(`Error processing ${source} event page:`, error);
+      console.error(`Error processing ${source} event page (${url}):`, error);
     }
   }
 
@@ -385,7 +420,7 @@ export class SearchService extends EventEmitter {
         this.emit('status', `Found ${existingEvents.length} existing events. Updating tickets...`);
         
         // Process all events concurrently but wait for completion
-        await Promise.all(existingEvents.map(async event => {
+        await Promise.all(existingEvents.map(async (event: DbEvent) => {
           const linkPromises = event.event_links.map(async (link: { source: string; url: string }) => {
             this.emit('status', `Updating tickets for ${event.name} from ${link.source}...`);
             try {
@@ -478,7 +513,7 @@ export class SearchService extends EventEmitter {
       if (searchResults.length > 0) {
         this.emit('status', `Found ${searchResults.length} events via DuckDuckGo`);
         
-        // Ensure search results match expected format
+        // Format tickets with event data for frontend
         const formattedResults: EventSearchResult[] = searchResults.map(result => ({
           name: result.name,
           date: result.date,
@@ -663,6 +698,7 @@ export class SearchService extends EventEmitter {
 
               // If we have a valid direct link, process it
               if (serviceLink && isValidEventUrl(serviceLink.url, service)) {
+                console.log(`Found direct ${service} event link:`, serviceLink.url);
                 console.log(`Processing ${service} event page from direct link:`, serviceLink.url);
                 await this.processEventPage(savedEvent.id, service, serviceLink.url);
               } else {
@@ -888,11 +924,14 @@ export class SearchService extends EventEmitter {
       }
       console.log(`Received HTML from ${source} (${html.length} bytes)`);
 
-      // Use Gemini to extract event data
+      // Determine if this is an event page or search page
+      const isEventPage = url.includes('/event/') || url.includes('/production/');
+      
+      // Use Gemini to extract data
       const parsedEvents = await this.parser.parseContent(html, url, {
         keyword: params.keyword,
         location: params.location || ''
-      });
+      }, isEventPage);
 
       if (!parsedEvents.events.length) {
         console.log('No events found by Gemini parser');
@@ -901,24 +940,29 @@ export class SearchService extends EventEmitter {
       }
 
       // Convert parsed events to our internal format
-      return parsedEvents.events.map((event: any) => ({
-        name: event.name,
-        date: event.date,
-        venue: event.venue,
-        location: event.location ? {
-          city: event.location.split(',')[0]?.trim() || '',
-          state: event.location.split(',')[1]?.trim() || '',
-          country: 'US'
-        } : undefined,
-        source,
-        link: event.eventUrl,
-        ticket_links: [{
+      const validEvents = parsedEvents.events
+        .filter((event: any) => event.url) // Filter out events without URLs first
+        .map((event: any) => ({
+          name: event.name,
+          date: event.date,
+          venue: event.venue,
+          location: event.location ? {
+            city: event.location.split(',')[0]?.trim() || '',
+            state: event.location.split(',')[1]?.trim() || '',
+            country: 'US'
+          } : undefined,
           source,
-          url: event.eventUrl,
-          is_primary: source === 'ticketmaster' || source === 'livenation'
-        }],
-        has_ticketmaster: source === 'ticketmaster' || source === 'livenation'
-      }));
+          link: event.url,
+          ticket_links: [{
+            source,
+            url: event.url,
+            is_primary: source === 'ticketmaster' || source === 'livenation'
+          }],
+          has_ticketmaster: source === 'ticketmaster' || source === 'livenation',
+          url: event.url
+        } as EventSearchResult));
+
+      return validEvents;
 
     } catch (error) {
       console.error(`Error searching ${source}:`, error);
@@ -1360,11 +1404,18 @@ export class SearchService extends EventEmitter {
   }
 
   private async searchStubHub(keyword: string, location?: string): Promise<InternalSearchResult> {
+    // Combine keyword and location with a space between them
     const searchTerm = location ? `${keyword} ${location}` : keyword;
     const url = `https://www.stubhub.com/secure/search?q=${encodeURIComponent(searchTerm)}`;
     
     try {
-      const result = await this.searchSite(url, 'stubhub', { keyword: searchTerm });
+      const html = await webReaderService.fetchPage(url);
+      const result = await this.searchSite(url, 'stubhub', { 
+        keyword,
+        location,
+        html
+      });
+
       return { events: result };
     } catch (error) {
       console.error('StubHub search error:', error);
@@ -1373,11 +1424,18 @@ export class SearchService extends EventEmitter {
   }
 
   private async searchVividSeats(keyword: string, location?: string): Promise<InternalSearchResult> {
+    // Combine keyword and location with a space between them
     const searchTerm = location ? `${keyword} ${location}` : keyword;
     const url = `https://www.vividseats.com/search?searchTerm=${encodeURIComponent(searchTerm)}`;
     
     try {
-      const result = await this.searchSite(url, 'vividseats', { keyword: searchTerm });
+      const html = await webReaderService.fetchPage(url);
+      const result = await this.searchSite(url, 'vividseats', { 
+        keyword,
+        location,
+        html
+      });
+
       return { events: result };
     } catch (error) {
       console.error('VividSeats search error:', error);
