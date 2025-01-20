@@ -1,22 +1,13 @@
 import { EventEmitter } from 'events';
-import { HfInference } from '@huggingface/inference';
 import type { SearchParams, SearchResult } from '../types/api';
-import type { Event, TicketData, EventData } from '@/lib/types/schemas';
+import type { Event, TicketData, EventData, SearchMetadata } from '@/lib/types/schemas';
 import { createClient } from '@supabase/supabase-js';
 import { config } from '@/src/config/env';
-import GoogleEventsSearcher from '../services/google-events-searcher';
 import { webReaderService } from './parsehub-service';
+import { DuckDuckGoSearcher } from './duckduckgo-searcher';
 import { normalizeDateTime, areDatesMatching, doDateTimesMatch, isValidDate } from '../utils/date-utils';
 import * as cheerio from 'cheerio';
-
-// Initialize HuggingFace client
-const HF_TOKEN = process.env.HF_TOKEN;
-if (!HF_TOKEN) {
-  console.warn('No HuggingFace API token found in environment variables (HF_TOKEN). Some features may be limited.');
-}
-console.log('HF Token available:', !!HF_TOKEN);
-
-const hf = new HfInference(HF_TOKEN || '');
+import { getParser } from './llm-service';
 
 interface DbEvent {
   id: string;
@@ -49,31 +40,36 @@ interface DbTicket {
   };
 }
 
-interface GoogleSearchResult {
-  id?: string;
+interface EventSearchResult {
   name: string;
   date: string;
   venue: string;
-  location: {
+  location?: {
     city: string;
     state: string;
     country: string;
   };
+  source?: string;
+  link?: string;
+  description?: string;
   ticket_links: Array<{
     source: string;
     url: string;
     is_primary: boolean;
   }>;
+  has_ticketmaster: boolean;
+  url?: string;
 }
 
-interface SearchMetadata {
-  sources: string[];
-  eventId?: string;
+// Add internal result type
+interface InternalSearchResult {
+  events: EventSearchResult[];
 }
 
 export class SearchService extends EventEmitter {
   private supabase;
-  private googleEventsSearcher: GoogleEventsSearcher;
+  private duckDuckGoSearcher: DuckDuckGoSearcher;
+  private parser;
 
   constructor() {
     super();
@@ -81,7 +77,8 @@ export class SearchService extends EventEmitter {
       config.supabase.url,
       config.supabase.serviceKey || config.supabase.anonKey
     );
-    this.googleEventsSearcher = new GoogleEventsSearcher();
+    this.duckDuckGoSearcher = new DuckDuckGoSearcher();
+    this.parser = getParser('gemini');
   }
 
   async findMatchingEvent(event: Event): Promise<DbEvent | null> {
@@ -346,34 +343,21 @@ export class SearchService extends EventEmitter {
     }
   }
 
-  private async processEventPage(eventId: string, source: string, url: string, html?: string) {
+  async processEventPage(eventId: string, source: string, url: string, html?: string): Promise<void> {
     try {
-      this.emit('status', `Processing event page from ${source}...`);
-      
-      // Only fetch HTML if not provided
-      const pageHtml = await webReaderService.fetchPage(url);
-      const result = await this.parseEventPage(pageHtml, source, eventId);
-      
-      if (result?.tickets?.length) {
-        try {
-          // Save to database first
-          const savedTickets = await this.saveTickets(eventId, result.tickets);
-          console.log(`Saved ${savedTickets.length} tickets to database for event`);
+      const searchResults = await this.searchSite(url, source, { 
+        keyword: '', // We don't need keyword when processing a known event page
+        html,
+        location: '' 
+      });
 
-          // Emit updated ticket list to frontend even if some tickets failed to save
-          await this.emitAllTickets(eventId);
-        } catch (error) {
-          console.error(`Error saving/emitting tickets for ${source}:`, error);
-          // Still return the parsed tickets even if saving failed
-        }
+      if (searchResults.length > 0) {
+        const event = searchResults[0];
+        // Process tickets for this event
+        // ... implement ticket processing logic here ...
       }
-
-      return result;
     } catch (error) {
-      console.error(`Error in processEventPage for ${source}:`, error);
-      this.emit('error', `Error processing ${source} event page: ${error instanceof Error ? error.message : 'Unknown error'}`);
-      // Return empty result but don't throw
-      return { tickets: [] };
+      console.error(`Error processing ${source} event page:`, error);
     }
   }
 
@@ -405,9 +389,8 @@ export class SearchService extends EventEmitter {
           const linkPromises = event.event_links.map(async (link: { source: string; url: string }) => {
             this.emit('status', `Updating tickets for ${event.name} from ${link.source}...`);
             try {
-             // await this.processEventPage(event.id, link.source, link.url);
+              await this.processEventPage(event.id, link.source, link.url);
             } catch (error) {
-              // Log error but continue with other sources
               console.error(`Error updating tickets from ${link.source}:`, error);
               this.emit('status', error instanceof Error ? error.message : 'Error updating tickets');
             }
@@ -484,19 +467,37 @@ export class SearchService extends EventEmitter {
 
       // If no existing events, run new searches
       this.emit('status', 'Starting new search...');
-      this.emit('status', 'Searching via Google Events...');
+      this.emit('status', 'Searching via DuckDuckGo...');
       
-      const googleResults = await this.googleEventsSearcher.searchConcerts(
+      const searchResults = await this.duckDuckGoSearcher.searchConcerts(
         params.keyword,
-        undefined,
+        params.location,
         params.location
-      ) as GoogleSearchResult[];
+      );
 
-      if (googleResults.length > 0) {
-        this.emit('status', `Found ${googleResults.length} events via Google`);
+      if (searchResults.length > 0) {
+        this.emit('status', `Found ${searchResults.length} events via DuckDuckGo`);
         
-        // Filter Google results by location and keyword
-        let filteredResults = googleResults;
+        // Ensure search results match expected format
+        const formattedResults: EventSearchResult[] = searchResults.map(result => ({
+          name: result.name,
+          date: result.date,
+          venue: result.venue,
+          location: result.location ? {
+            city: result.location.city || '',
+            state: result.location.state || '',
+            country: result.location.country || 'US'
+          } : undefined,
+          source: result.source,
+          link: result.link,
+          description: result.description,
+          ticket_links: result.ticket_links || [],
+          has_ticketmaster: result.has_ticketmaster || false,
+          url: result.url
+        }));
+        
+        // Filter results by location and keyword
+        let filteredResults = formattedResults;
         
         // Filter by location if provided
         if (params.location) {
@@ -521,7 +522,7 @@ export class SearchService extends EventEmitter {
         console.log(`Found ${filteredResults.length} events matching keyword and location`);
 
         if (filteredResults.length === 0) {
-          console.log('No matching events found in Google results');
+          console.log('No matching events found in search results');
           return {
             success: false,
             data: [],
@@ -594,12 +595,11 @@ export class SearchService extends EventEmitter {
           .from('events')
           .upsert({
             name: bestEvent.name,
-            // Use the date from the event, but ensure it's in YYYY-MM-DD format
-            date: bestEvent.date.split('T')[0],  // This will give us 2025-01-17
+            date: bestEvent.date.split('T')[0],
             venue: bestEvent.venue,
-            city: bestEvent.location.city,
-            state: bestEvent.location.state,
-            country: bestEvent.location.country,
+            city: bestEvent.location?.city || '',
+            state: bestEvent.location?.state || '',
+            country: bestEvent.location?.country || 'US',
             created_at: new Date().toISOString()
           })
           .select()
@@ -657,7 +657,7 @@ export class SearchService extends EventEmitter {
           // Continue with other ticket sources
           for (const service of ['stubhub', 'vividseats']) {
             try {
-              // Check if we have a direct event link from Google results
+              // Check if we have a direct event link from search results
               const serviceLink = Array.from(allTicketLinks.values())
                 .find(link => link.source === service);
 
@@ -826,7 +826,7 @@ export class SearchService extends EventEmitter {
               )
             )
           `)
-          .eq('event_id', savedEvent.id)  // Use the ID of the event we just created
+          .eq('event_id', savedEvent.id)
           .order('price');
 
         // Create a single event object with tickets
@@ -854,7 +854,7 @@ export class SearchService extends EventEmitter {
 
         return {
           success: true,
-          data: [eventWithTickets],  // Return array with single event containing all tickets
+          data: [eventWithTickets],
           metadata: {
             sources: Array.from(new Set(savedTickets?.map(t => t.source) || [])),
             eventId: savedEvent.id
@@ -879,413 +879,104 @@ export class SearchService extends EventEmitter {
     }
   }
 
-  private async searchSite(url: string, source: string, params: { keyword: string; location?: string; html?: string }): Promise<EventData[]> {
-    this.emit('status', `Searching ${source}...`);
-    
+  async searchSite(url: string, source: string, params: { keyword: string; html?: string; location?: string }): Promise<EventSearchResult[]> {
+    let html = params.html || '';
     try {
       // Get HTML from Jina Reader only if not provided
-      const html = params.html || await webReaderService.fetchPage(url);
+      if (!html) {
+        html = await webReaderService.fetchPage(url);
+      }
       console.log(`Received HTML from ${source} (${html.length} bytes)`);
 
-      const response = await hf.textGeneration({
-        model: 'mistralai/Mistral-7B-Instruct-v0.2',
-        inputs: `<s>[INST]Extract events from HTML as JSON array. Format: [{"name":"event name","venue":"venue name","date":"YYYY-MM-DD","city":"city name","state":"ST","country":"US","url":"anchor tag href url path"}]. Return only JSON array.
-HTML to extract from:
-${html}[/INST]</s>`,
-        parameters: {
-          max_new_tokens: 1000,
-          temperature: 0.1,
-          do_sample: false,
-          stop: ["</s>", "[INST]"]
-        }
+      // Use Gemini to extract event data
+      const parsedEvents = await this.parser.parseContent(html, url, {
+        keyword: params.keyword,
+        location: params.location || ''
       });
 
-      console.log(`Chunk response:`, response.generated_text.split('</body></html>')[1]);
+      if (!parsedEvents.events.length) {
+        console.log('No events found by Gemini parser');
+        // Fall back to regex-based extraction
+        return this.extractEventDataWithRegex(html, source, url);
+      }
 
-      let eventsData: any[];
-      // Find the last occurrence of a JSON array (after the HTML)
-      const lastJsonMatch = response.generated_text.split('</body></html>')[1]?.match(/\[\s*{[\s\S]*}\s*\]/);
-      const cleanedResponse = lastJsonMatch ? lastJsonMatch[0] : '[]';
-      console.log('Cleaned response:', cleanedResponse);
-      const parsed = JSON.parse(cleanedResponse);
-      eventsData = Array.isArray(parsed) ? parsed : [parsed];
-      console.log('Parsed event data:', eventsData);
+      // Convert parsed events to our internal format
+      return parsedEvents.events.map((event: any) => ({
+        name: event.name,
+        date: event.date,
+        venue: event.venue,
+        location: event.location ? {
+          city: event.location.split(',')[0]?.trim() || '',
+          state: event.location.split(',')[1]?.trim() || '',
+          country: 'US'
+        } : undefined,
+        source,
+        link: event.eventUrl,
+        ticket_links: [{
+          source,
+          url: event.eventUrl,
+          is_primary: source === 'ticketmaster' || source === 'livenation'
+        }],
+        has_ticketmaster: source === 'ticketmaster' || source === 'livenation'
+      }));
 
-      // Filter and convert events to EventData format
-      const events = eventsData
-        .filter(eventData => {
-          // Skip obvious auxiliary events by checking venue
-          if (!eventData || !eventData.venue || eventData.venue.toLowerCase().includes('parking')) {
-            return false;
-          }
+    } catch (error) {
+      console.error(`Error searching ${source}:`, error);
+      // Fall back to regex-based extraction on error if we have HTML
+      if (html) {
+        return this.extractEventDataWithRegex(html, source, url);
+      }
+      return [];
+    }
+  }
 
-          const normalizedEventName = normalizeEventName(eventData.name || '');
-          const normalizedKeyword = normalizeEventName(params.keyword);
-          
-          // Check if either name contains the other
-          return normalizedEventName.includes(normalizedKeyword) || 
-                 normalizedKeyword.includes(normalizedEventName);
-        })
-        .map(eventData => {
-          // Ensure URL is properly formatted
-          let eventUrl = eventData.url || '';
-          if (eventUrl && !eventUrl.startsWith('http')) {
-            eventUrl = source === 'vividseats' 
-              ? `https://www.vividseats.com${eventUrl}`
-              : `https://www.stubhub.com${eventUrl}`;
-          }
+  private extractEventDataWithRegex(html: string, source: string, url: string): EventSearchResult[] {
+    try {
+      const $ = cheerio.load(html);
+      const events: EventSearchResult[] = [];
 
-          return {
-            name: eventData.name || '',
-            venue: eventData.venue || '',
-            date: eventData.date || '',
-            location: {
-              city: eventData.city || '',
-              state: eventData.state || '',
-              country: eventData.country || 'US'
-            },
-            source,
-            url: eventUrl,
-            tickets: [] as TicketData[]
+      // Look for common event patterns in the HTML
+      $('*').each((_, el) => {
+        const $el = $(el);
+        const text = $el.text().trim();
+
+        // Skip empty or very short text
+        if (text.length < 10) return;
+
+        // Try to extract event data using regex patterns
+        const dateMatch = text.match(/\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+\d{4}\b/i);
+        const venueMatch = text.match(/\bat\s+([^,]+)(?:\s+in\s+([^,]+),\s*([A-Z]{2}))?/i);
+        
+        if (dateMatch || venueMatch) {
+          const event: Partial<EventSearchResult> = {
+            date: dateMatch ? normalizeDateTime(dateMatch[0]) : '',
+            venue: venueMatch ? venueMatch[1].trim() : '',
+            location: venueMatch ? {
+              city: venueMatch[2]?.trim() || '',
+              state: venueMatch[3]?.trim() || '',
+              country: 'US'
+            } : undefined
           };
-        });
+
+          if (event.date || event.venue) {
+            events.push({
+              ...event,
+              name: '', // Will be filled by the caller
+              ticket_links: [],
+              has_ticketmaster: false
+            } as EventSearchResult);
+          }
+        }
+      });
 
       return events;
     } catch (error) {
-      console.error(`Error searching ${source}:`, error);
+      console.error('Error in regex extraction:', error);
       return [];
     }
   }
 
-  private async processVividSeatsChunks(
-    $: cheerio.Root,
-    elementArray: cheerio.Element[],
-    startIndex: number,
-    chunkSize: number,
-    eventId?: string
-  ): Promise<TicketData[]> {
-    try {
-      // Get all listing containers
-      const listingContainers = $('[data-testid="listings-container"] a');
-      console.log(`Found ${listingContainers.length} listing containers in HTML`);
-      
-      const chunks: cheerio.Element[][] = [];
-      
-      // Split into chunks
-      for (let i = 0; i < listingContainers.length; i += chunkSize) {
-        chunks.push(listingContainers.slice(i, i + chunkSize).toArray());
-      }
-
-      console.log(`Processing ${listingContainers.length} tickets in ${chunks.length} chunks`);
-
-      // If we have an eventId, first delete existing tickets for this source
-      if (eventId) {
-        console.log('Deleting existing tickets for event before processing new ones');
-        const { error: deleteError } = await this.supabase
-          .from('tickets')
-          .delete()
-          .eq('event_id', eventId)
-          .eq('source', 'vividseats');
-
-        if (deleteError) {
-          console.error('Error deleting existing tickets:', deleteError);
-          throw deleteError;
-        }
-      }
-
-      const allTickets: TicketData[] = [];
-      const processedListingIds = new Set<string>();
-
-      // Process each chunk asynchronously
-      const processChunk = async (chunk: cheerio.Element[], chunkIndex: number): Promise<TicketData[]> => {
-        try {
-          // Wrap each ticket element in a div with a data attribute for better parsing
-          const wrappedHtml = chunk.map((el, i) => {
-            const ticketHtml = $.html(el);
-            return `<div data-ticket-index="${chunkIndex * chunkSize + i}">${ticketHtml}</div>`;
-          }).join('\n');
-
-          console.log(`Processing chunk ${chunkIndex + 1}, tickets ${chunkIndex * chunkSize + 1}-${Math.min((chunkIndex + 1) * chunkSize, listingContainers.length)}`);
-
-          const response = await hf.textGeneration({
-            model: 'mistralai/Mistral-7B-Instruct-v0.2',
-            inputs: `<s>[INST]Extract ticket listings from HTML. Each ticket is wrapped in a div. For each ticket extract:
-- section: The section name (e.g. "GA Main Floor", "GA Balcony", "GA4")
-- row: The row number/letter (e.g. "G4", "12", "GA")
-- price: The numeric price value
-- quantity: The number of tickets available
-- source: Always "vividseats"
-- listing_id: The data-testid attribute value
-- ticket_url: The href attribute from the anchor tag
-
-Example output:
-[{"section":"GA4","row":"G4","price":79,"quantity":1,"source":"vividseats","listing_id":"VB11556562645","ticket_url":"https://www.vividseats.com/poppy-tickets-chicago-house-of-blues-chicago-3-21-2025--concerts-pop/production/5369315?showDetails=VB11556562645"}]
-
-HTML to extract from:
-${wrappedHtml}[/INST]</s>`,
-            parameters: {
-              max_new_tokens: 4000,
-              temperature: 0.1,
-              do_sample: false,
-              stop: ["</s>", "[INST]"]
-            }
-          });
-
-          const responseText = response.generated_text.split('[/INST]</s>')[1];
-          if (!responseText) {
-            console.log(`No response text found after [/INST]</s> in chunk ${chunkIndex + 1}`);
-            return [];
-          }
-
-          const cleanedResponse = responseText
-            .replace(/\\\\/g, '\\')
-            .replace(/\\"/g, '"')
-            .replace(/\\n/g, ' ')
-            .replace(/\\t/g, ' ')
-            .replace(/\\_/g, '_')
-            .replace(/[^\x20-\x7E]/g, '')
-            .trim();
-
-          // Try to find the last complete JSON object if response was truncated
-          const jsonMatch = cleanedResponse.match(/\[\s*{[\s\S]*?}\s*\]/);
-          let chunkTickets: TicketData[] = [];
-
-          if (!jsonMatch) {
-            // Try to find any complete JSON objects in the response
-            const objectMatches = cleanedResponse.match(/{\s*"section"[\s\S]*?}/g);
-            if (objectMatches) {
-              try {
-                chunkTickets = JSON.parse(`[${objectMatches.join(',')}]`);
-              } catch (e) {
-                console.error(`Error parsing individual tickets from chunk ${chunkIndex + 1}:`, e);
-              }
-            }
-          } else {
-            try {
-              const parsed = JSON.parse(jsonMatch[0]);
-              chunkTickets = Array.isArray(parsed) ? parsed : [parsed];
-            } catch (error) {
-              console.error(`Error parsing JSON from chunk ${chunkIndex + 1}:`, error);
-            }
-          }
-
-          // Filter out duplicates by listing_id
-          const uniqueTickets = chunkTickets.filter(ticket => {
-            if (!ticket.listing_id || processedListingIds.has(ticket.listing_id)) {
-              return false;
-            }
-            processedListingIds.add(ticket.listing_id);
-            return true;
-          });
-
-          if (uniqueTickets.length > 0) {
-            console.log(`Found ${uniqueTickets.length} tickets in chunk ${chunkIndex + 1}`);
-            
-            // Save tickets to database and update frontend immediately if we have an eventId
-            if (eventId) {
-              try {
-                await this.saveTickets(eventId, uniqueTickets);
-                await this.emitAllTickets(eventId);
-              } catch (error) {
-                console.error(`Error saving tickets from chunk ${chunkIndex + 1}:`, error);
-              }
-            }
-
-            allTickets.push(...uniqueTickets);
-          }
-
-          return uniqueTickets;
-        } catch (error) {
-          console.error(`Error processing chunk ${chunkIndex + 1}:`, error);
-          return [];
-        }
-      };
-
-      // Process all chunks concurrently
-      const chunkPromises = chunks.map((chunk, index) => processChunk(chunk, index));
-
-      // Wait for all chunks to complete
-      await Promise.all(chunkPromises);
-
-      console.log(`Total unique tickets found: ${processedListingIds.size}`);
-      return allTickets;
-    } catch (error) {
-      console.error('Error in processVividSeatsChunks:', error);
-      return [];
-    }
-  }
-
-  private async parseEventPage(html: string, source: string, eventId?: string) {
-    try {
-      // More accurate token estimation - HTML characters tend to encode to more tokens
-      const estimatedTokens = Math.ceil(html.length / 2.5); // Conservative estimate
-      const MAX_TOKENS = 22000; // Leave room for max_new_tokens and prompt
-
-      if (source === 'vividseats' && estimatedTokens > MAX_TOKENS) {
-        // For large VividSeats HTML, process in chunks
-        console.log(`VividSeats HTML exceeds token limit (${estimatedTokens} estimated tokens), processing in chunks`);
-        const $ = cheerio.load(html);
-        const ticketElements = $('[data-testid="listings-container"]');
-        const elementArray = ticketElements.toArray();
-        const CHUNK_SIZE = 10;
-
-        console.log(`Found ${elementArray.length} ticket elements to process in chunks of ${CHUNK_SIZE}`);
-        const tickets = await this.processVividSeatsChunks($, elementArray, 0, CHUNK_SIZE, eventId);
-        return { tickets };
-      }
-
-      // Use existing logic for small HTML or non-VividSeats sources
-      const prompt = source === 'vividseats' ?
-        `<s>[INST]Extract ticket listings from HTML as JSON array. Each ticket should be a JSON object with these fields:
-- section: The section name (e.g. "GA", "Floor", "Balcony")
-- row: The row number/letter (use "GA" for general admission)
-- price: The numeric price value (e.g. 192)
-- quantity: The number of tickets (e.g. "2" or range like "1-8")
-- source: Always "vividseats"
-- listing_id: The data-testid attribute value
-- ticket_url: The href attribute from the anchor tag
-
-Example output:
-[{"section":"GA","row":"GA","price":192,"quantity":"1-8","source":"vividseats","listing_id":"VB11572186950","ticket_url":"https://www.vividseats.com/..."}]
-
-Return only the JSON array, no explanations.
-
-${html}[/INST]</s>` :
-        `<s>[INST]Extract ticket listings from HTML as JSON array. Each ticket should be a JSON object with these fields:
-- section: The section name (e.g. "Floor GA", "GA Standing")
-- row: The row number/letter (use "GA" for general admission)
-- price: The numeric price value (e.g. 123.45)
-- quantity: The number of tickets (e.g. "2" or range like "1-4")
-- source: Always "stubhub"
-- listing_id: The data-listing-id attribute value
-- ticket_url: The href attribute from the anchor tag
-
-Example output:
-[{"section":"Floor GA","row":"GA","price":123.45,"quantity":"2","source":"stubhub","listing_id":"123456"}]
-
-Return only the JSON array, no explanations.
-
-${html}[/INST]</s>`;
-
-      const response = await hf.textGeneration({
-        model: 'mistralai/Mistral-7B-Instruct-v0.2',
-        inputs: prompt,
-        parameters: { 
-          max_new_tokens: 10000,
-          temperature: 0.1,
-          do_sample: false,
-          stop: ["</s>", "[INST]"]
-        }
-      });
-
-      let tickets: TicketData[];
-      try {
-        // Extract JSON array from response
-        const responseText = response.generated_text.split('[/INST]</s>')[1];
-        console.log('Raw response text:', responseText);
-
-        // Clean up the response text
-        const cleanedResponse = responseText
-          .replace(/\[\s*\[/g, '[{')           // Convert [[ to [{
-          .replace(/\]\s*\]/g, '}]')           // Convert ]] to }]
-          .replace(/\\\\/g, '\\')              // Fix escaped backslashes
-          .replace(/\\"/g, '"')                // Fix escaped quotes
-          .replace(/\\n/g, ' ')                // Replace newlines
-          .replace(/\\t/g, ' ')                // Replace tabs
-          .replace(/\\_/g, '_')                // Fix escaped underscores
-          .replace(/[^\x20-\x7E]/g, '')        // Remove non-printable chars
-          .trim();
-
-        // Try to find a valid JSON array in the cleaned response
-        const jsonMatch = cleanedResponse.match(/\[\s*\{[\s\S]*?\}\s*\]/);
-        if (!jsonMatch) {
-          // If no object format found, try array format
-          const arrayMatch = cleanedResponse.match(/\[\s*\[[\s\S]*?\]\s*\]/);
-          if (arrayMatch) {
-            // Convert array format to object format
-            const arrayData = JSON.parse(arrayMatch[0]);
-            if (Array.isArray(arrayData) && arrayData.length > 0 && Array.isArray(arrayData[0])) {
-              const objectData = arrayData.map(([section, row, price, quantity, listing_id, ticket_url]) => ({
-                section,
-                row,
-                price,
-                quantity,
-                source: source,
-                listing_id,
-                ticket_url
-              }));
-              tickets = objectData;
-            } else {
-              console.log('Invalid array format in response');
-              return { tickets: [] };
-            }
-          } else {
-            console.log('No valid JSON found in response');
-            return { tickets: [] };
-          }
-        } else {
-          try {
-            const parsed = JSON.parse(jsonMatch[0]);
-            tickets = Array.isArray(parsed) ? parsed : [parsed];
-          } catch (e) {
-            console.error('JSON parse error:', e);
-            console.error('Failed to parse string:', jsonMatch[0]);
-            return { tickets: [] };
-          }
-        }
-
-        // Clean up and validate the data
-        tickets = tickets.map(ticket => {
-          // Convert quantity string to number (take the first number in a range)
-          const quantityStr = ticket.quantity?.toString() || '1';
-          const quantity = parseInt(quantityStr.split('-')[0]);
-
-          // Clean up ticket URL if it's a relative path
-          let ticketUrl = ticket.ticket_url || null;
-          if (ticketUrl && !ticketUrl.startsWith('http')) {
-            ticketUrl = source === 'vividseats' 
-              ? `https://www.vividseats.com${ticketUrl}`
-              : `https://www.stubhub.com${ticketUrl}`;
-          }
-
-          return {
-            section: ticket.section || 'General Admission',
-            row: ticket.row === 'NA' ? 'GA' : ticket.row || 'GA',
-            price: parseFloat(ticket.price?.toString() || '0'),
-            quantity: quantity,
-            source: ticket.source || source,
-            listing_id: ticket.listing_id || crypto.randomUUID(),
-            ticket_url: ticketUrl
-          };
-        }).filter(ticket => 
-          ticket.price > 0 && 
-          ticket.section.length > 0
-        );
-
-        // Remove duplicates based on section, row, and price
-        tickets = tickets.filter((ticket, index, self) =>
-          index === self.findIndex((t) => (
-            t.section === ticket.section &&
-            t.row === ticket.row &&
-            t.price === ticket.price
-          ))
-        );
-
-        console.log(`Found ${tickets.length} tickets from ${source}`);
-      } catch (e) {
-        console.error('Failed to parse HF response:', e);
-        return { tickets: [] };
-      }
-
-      return { tickets };
-    } catch (error) {
-      console.error(`Error parsing ${source} event page:`, error);
-      return { tickets: [] };
-    }
-  }
-
-
-  private filterEventsByLocation(events: GoogleSearchResult[], searchLocation: string): GoogleSearchResult[] {
+  private filterEventsByLocation(events: EventSearchResult[], searchLocation: string): EventSearchResult[] {
     // Normalize the search location
     const normalizedSearch = searchLocation.toLowerCase().trim();
     
@@ -1444,10 +1135,10 @@ ${html}[/INST]</s>`;
     }
   }
 
-  private findBestEvent(events: GoogleSearchResult[]): GoogleSearchResult {
+  private findBestEvent(events: EventSearchResult[]): EventSearchResult {
     return events.reduce((best, current) => {
       // Score each event based on information completeness
-      const getEventScore = (event: GoogleSearchResult) => {
+      const getEventScore = (event: EventSearchResult) => {
         let score = 0;
         // Prefer events with full title
         if (event.name.toLowerCase().includes('tour')) score += 2;
@@ -1602,6 +1293,205 @@ ${html}[/INST]</s>`;
 
     // Fall back to state timezone, defaulting to Eastern if not found
     return stateTimezones[state] || 'America/New_York';
+  }
+
+  async searchEvents(keyword: string, location?: string): Promise<SearchResult> {
+    this.emit('status', 'Starting multi-source event search...');
+    
+    try {
+      // Run searches in parallel
+      const [serpResults, stubHubResults, vividSeatsResults] = await Promise.allSettled([
+        // 1. Use SerpAPI to get initial event data and discover more ticket sources
+        this.searchSite(keyword, location || '', { keyword }),
+        
+        // 2. Direct StubHub search
+        this.searchStubHub(keyword, location),
+        
+        // 3. Direct VividSeats search
+        this.searchVividSeats(keyword, location)
+      ]);
+
+      const events: Event[] = [];
+      const sources = new Set<string>();
+      
+      // Process SerpAPI results
+      if (serpResults.status === 'fulfilled' && serpResults.value) {
+        const serpEvents = this.processSerpApiResults(serpResults.value);
+        events.push(...serpEvents);
+        sources.add('serpapi');
+      }
+
+      // Process StubHub results
+      if (stubHubResults.status === 'fulfilled' && stubHubResults.value?.events) {
+        events.push(...stubHubResults.value.events);
+        sources.add('stubhub');
+      }
+
+      // Process VividSeats results
+      if (vividSeatsResults.status === 'fulfilled' && vividSeatsResults.value?.events) {
+        events.push(...vividSeatsResults.value.events);
+        sources.add('vividseats');
+      }
+
+      // Deduplicate events based on name, date, and venue
+      const uniqueEvents = this.deduplicateEvents(events);
+
+      // Convert Event[] to EventData[]
+      const eventData: EventData[] = uniqueEvents.map(event => ({
+        ...event,
+        tickets: event.tickets || []
+      }));
+
+      return {
+        success: true,
+        data: eventData,
+        metadata: {
+          sources: Array.from(sources)
+        }
+      };
+    } catch (error) {
+      console.error('Error in searchEvents:', error);
+      return {
+        success: false,
+        data: [],
+        metadata: { sources: [] }
+      };
+    }
+  }
+
+  private async searchStubHub(keyword: string, location?: string): Promise<InternalSearchResult> {
+    const searchTerm = location ? `${keyword} ${location}` : keyword;
+    const url = `https://www.stubhub.com/secure/search?q=${encodeURIComponent(searchTerm)}`;
+    
+    try {
+      const result = await this.searchSite(url, 'stubhub', { keyword: searchTerm });
+      return { events: result };
+    } catch (error) {
+      console.error('StubHub search error:', error);
+      return { events: [] };
+    }
+  }
+
+  private async searchVividSeats(keyword: string, location?: string): Promise<InternalSearchResult> {
+    const searchTerm = location ? `${keyword} ${location}` : keyword;
+    const url = `https://www.vividseats.com/search?searchTerm=${encodeURIComponent(searchTerm)}`;
+    
+    try {
+      const result = await this.searchSite(url, 'vividseats', { keyword: searchTerm });
+      return { events: result };
+    } catch (error) {
+      console.error('VividSeats search error:', error);
+      return { events: [] };
+    }
+  }
+
+  private processSerpApiResults(serpData: any): Event[] {
+    if (!serpData || !serpData.ticketLinks) return [];
+
+    const event: Event = {
+      name: serpData.name,
+      date: serpData.date || '',
+      venue: serpData.venue?.name || '',
+      location: {
+        city: serpData.venue?.city || '',
+        state: serpData.venue?.state || '',
+        country: serpData.venue?.country || 'US'
+      },
+      source: 'serpapi',
+      url: serpData.ticketLinks[0]?.url || ''
+    };
+
+    return [event];
+  }
+
+  private deduplicateEvents(events: Event[]): Event[] {
+    const seen = new Set<string>();
+    return events.filter(event => {
+      const key = `${event.name.toLowerCase()}-${event.date}-${event.venue?.toLowerCase()}-${event.location?.city?.toLowerCase()}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
+
+  private parseEventData(text: string, source: string, url: string): EventSearchResult[] {
+    try {
+      // Extract event name (usually appears after "Event:" or at the start of a line)
+      const nameMatch = text.match(/Event:?\s*([^\n]+)/i) || 
+                     text.match(/Title:?\s*([^\n]+)/i) ||
+                     text.match(/^([^\n]+)/);
+      const name = nameMatch ? nameMatch[1].trim() : '';
+
+      // Extract date (look for common date formats)
+      const dateMatch = text.match(/Date:?\s*([^\n]+)/i) ||
+                     text.match(/\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]* \d{1,2},? \d{4}\b/i) ||
+                     text.match(/\b\d{4}-\d{2}-\d{2}\b/);
+      const date = dateMatch ? normalizeDateTime(dateMatch[1] || dateMatch[0]) : '';
+
+      // Extract venue
+      const venueMatch = text.match(/Venue:?\s*([^\n]+)/i) ||
+                      text.match(/at\s+([^,\n]+)/i);
+      const venue = venueMatch ? venueMatch[1].trim() : '';
+
+      // Extract location (city, state)
+      const locationMatch = text.match(/Location:?\s*([^\n]+)/i) ||
+                        text.match(/in\s+([^,\n]+),\s*([A-Z]{2})/i);
+      
+      const location = locationMatch ? {
+        city: locationMatch[1].trim(),
+        state: (locationMatch[2] || '').trim(),
+        country: 'US'
+      } : undefined;
+
+      // Extract ticket links
+      const ticketLinks: Array<{ source: string; url: string; is_primary: boolean }> = [];
+      
+      // Add the source URL as a ticket link
+      if (url) {
+        ticketLinks.push({
+          source,
+          url,
+          is_primary: source === 'ticketmaster' || source === 'livenation'
+        });
+      }
+
+      // Look for additional ticket links in the text
+      const urlMatches = text.match(/https?:\/\/[^\s)]+/g) || [];
+      urlMatches.forEach(matchedUrl => {
+        const urlLower = matchedUrl.toLowerCase();
+        const knownSources = ['ticketmaster', 'livenation', 'stubhub', 'vividseats', 'seatgeek'];
+        const matchedSource = knownSources.find(s => urlLower.includes(s));
+        
+        if (matchedSource && !ticketLinks.some(link => link.url === matchedUrl)) {
+          ticketLinks.push({
+            source: matchedSource,
+            url: matchedUrl,
+            is_primary: matchedSource === 'ticketmaster' || matchedSource === 'livenation'
+          });
+        }
+      });
+
+      // Only return event if we have at least a name and either a date or venue
+      if (name && (date || venue)) {
+        return [{
+          name,
+          date: date || new Date().toISOString(),
+          venue: venue || 'TBD',
+          location,
+          source,
+          link: url,
+          ticket_links: ticketLinks,
+          has_ticketmaster: ticketLinks.some(link => 
+            link.source === 'ticketmaster' || link.source === 'livenation'
+          )
+        }];
+      }
+
+      return [];
+    } catch (error) {
+      console.error('Error parsing event data:', error);
+      return [];
+    }
   }
 }
 

@@ -1,5 +1,17 @@
 import type { Event } from '@/lib/types/schemas';
 import { normalizeDateTime, areDatesMatching, doDateTimesMatch } from '../utils/date-utils';
+import * as cheerio from 'cheerio';
+
+interface ScrapingNinjaResponse {
+  info: {
+    version: string;
+    statusCode: number;
+    statusMessage: string;
+    headers: Record<string, string | string[]>;
+    finalUrl: string;
+  };
+  body: string;
+}
 
 interface EventLocation {
   city: string;
@@ -19,11 +31,13 @@ interface SearchResult extends Event {
   link?: string;
   description?: string;
   ticket_links: EventLink[];
-  has_ticketmaster?: boolean;
+  has_ticketmaster: boolean;
 }
 
 class GoogleEventsSearcher {
   private apiKey: string;
+  private readonly API_URL = 'https://scrapeninja.p.rapidapi.com/scrape';
+  private readonly GOOGLE_CSE_URL = 'https://www.googleapis.com/customsearch/v1';
   private currentSearchResults: SearchResult[] = [];
   private readonly PRIORITY_VENDORS = [
     'ticketmaster',
@@ -36,16 +50,22 @@ class GoogleEventsSearcher {
   ];
 
   constructor() {
-    this.apiKey = process.env.ZENROWS_API_KEY || '';
+    this.apiKey = process.env.SCRAPING_NINJA_API_KEY || '';
     if (!this.apiKey) {
-      console.warn('ZenRows API key not found in environment variables');
+      console.warn('ScrapingNinja API key not found in environment variables');
     }
   }
 
   async searchConcerts(keyword: string, venue?: string, location?: string): Promise<SearchResult[]> {
     try {
-      // First try searching for events with location context
-      const eventsResults = await this.searchGoogleEvents(keyword, location);
+      // First try searching for events with location context via scraping
+      let eventsResults = await this.searchGoogleEvents(keyword, location);
+      
+      // If scraping fails or returns no results, try the Google Custom Search API
+      if (eventsResults.length === 0) {
+        console.log('Trying Google Custom Search API...');
+        eventsResults = await this.searchGoogleCustomSearch(keyword, location);
+      }
       
       // Store current search results for multiple event detection
       this.currentSearchResults = eventsResults;
@@ -70,57 +90,113 @@ class GoogleEventsSearcher {
       `${keyword} tickets ${location}` : 
       `${keyword} tickets`;
 
-    const url = `https://www.google.com/search?q=${encodeURIComponent(searchQuery)}&hl=en&gl=us`;
+    // Use a simpler search URL format
+    const url = `https://www.google.com/search?q=${encodeURIComponent(searchQuery)}`;
     console.log('Search URL:', url);
 
     try {
-      const searchParams = new URLSearchParams({
-        url: url,
-        apikey: this.apiKey,
-        premium_proxy: 'true',
-        autoparse: 'true'
-      });
+      // Add a longer delay between requests
+      await new Promise(resolve => setTimeout(resolve, 5000));
 
-      console.log('ZenRows request params:', Object.fromEntries(searchParams));
-
-      const response = await fetch(`https://api.zenrows.com/v1/?${searchParams}`, {
-        method: 'GET'
+      const response = await fetch(this.API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-rapidapi-key': this.apiKey,
+          'x-rapidapi-host': 'scrapeninja.p.rapidapi.com'
+        },
+        body: JSON.stringify({
+          url: url,
+          javascript: false,
+          timeout: 30
+        })
       });
 
       if (!response.ok) {
         const errorText = await response.text();
-        throw new Error(`ZenRows API error: ${response.status} ${response.statusText} - ${errorText}`);
+        throw new Error(`ScrapingNinja API error: ${response.status} ${response.statusText} - ${errorText}`);
       }
 
-      const data = await response.json();
-      console.log('ZenRows response:', JSON.stringify(data, null, 2));
+      const rawData = await response.json();
+      console.log('Raw ScrapingNinja response:', rawData);
 
-      if (!data.organic_results?.length) {
-        console.log('No organic search results found');
-        return [];
+      // Check if we got a valid response
+      if (!rawData || typeof rawData !== 'object') {
+        throw new Error('Invalid response format from ScrapingNinja');
       }
 
-      // Process organic search results to extract event information
-      const processedEvents = data.organic_results
-        .map((result: any) => {
+      const data = rawData as ScrapingNinjaResponse;
+      
+      // Log useful metadata
+      console.log('ScrapingNinja response metadata:', {
+        statusCode: data.info?.statusCode,
+        finalUrl: data.info?.finalUrl
+      });
+
+      // Check if we got a successful response with HTML content
+      if (!data.body || typeof data.body !== 'string') {
+        console.error('Invalid or missing HTML content in response:', data);
+        throw new Error('No HTML content in response');
+      }
+
+      // Check for bot detection page
+      if (data.info?.statusCode === 429 || data.body.includes('detected unusual traffic') || data.body.includes('sorry/index')) {
+        console.error('Google bot detection triggered');
+        throw new Error('Google bot detection triggered - try again later');
+      }
+
+      // Use Cheerio to parse the HTML and extract event information
+      const $ = cheerio.load(data.body);
+      
+      // Look for event cards/results in Google's search results
+      const eventResults: SearchResult[] = [];
+      
+      // More specific Google event result selectors
+      const eventSelectors = [
+        'div.g div.yuRUbf > a',           // Main search results
+        'div[jscontroller] > div > a',     // Event cards
+        'div.MjjYud div.vdQmEd > a',      // Shopping results
+        'div.g div.kvH3mc > div.yuRUbf a'  // Rich results
+      ];
+
+      eventSelectors.forEach(selector => {
+        $(selector).each((_, element) => {
           try {
-            // Extract event data from the search result
-            const eventData = this.extractEventData(result);
+            const $el = $(element);
+            
+            // Get the full href URL
+            const link = $el.attr('href');
+            if (!link || !link.startsWith('http')) return;
+
+            // Extract title from h3 or data-title
+            const title = $el.find('h3').first().text().trim() || 
+                         $el.attr('data-title') || 
+                         $el.find('[role="heading"]').first().text().trim();
+            if (!title) return;
+
+            // Extract description from various possible elements
+            const description = $el.find('div.VwiC3b, div.yXK7lf, div.MUxGbd, .s3v9rd').first().text().trim() ||
+                              $el.parent().find('div.VwiC3b, div.yXK7lf, div.MUxGbd').first().text().trim();
+            if (!description) return;
+
+            console.log('Found potential event:', { title, link, description });
+
+            // Process the result
+            const eventData = this.extractEventData({ title, description, link });
             if (eventData) {
-              console.log('Found event data:', eventData);
-              return eventData;
+              eventResults.push(eventData);
             }
           } catch (error) {
-            console.error('Error processing result:', error);
+            console.error('Error processing event element:', error);
           }
-          return null;
-        })
-        .filter(Boolean);
+        });
+      });
 
-      console.log(`Found ${processedEvents.length} events`);
-      return processedEvents;
+      console.log(`Found ${eventResults.length} events`);
+      return eventResults;
+
     } catch (error) {
-      console.error('ZenRows API error:', error);
+      console.error('ScrapingNinja API error:', error);
       return [];
     }
   }
@@ -239,6 +315,47 @@ class GoogleEventsSearcher {
   private determinePrimarySource(ticketLinks: EventLink[]): string {
     const primaryLink = ticketLinks.find(link => link.is_primary);
     return primaryLink?.source || 'unknown';
+  }
+
+  private async searchGoogleCustomSearch(keyword: string, location?: string): Promise<SearchResult[]> {
+    const searchQuery = location ? 
+      `${keyword} tickets ${location}` : 
+      `${keyword} tickets`;
+
+    try {
+      const response = await fetch(`${this.GOOGLE_CSE_URL}?key=${process.env.GOOGLE_SEARCH_API_KEY}&cx=${process.env.GOOGLE_SEARCH_ENGINE_ID}&q=${encodeURIComponent(searchQuery)}`);
+
+      if (!response.ok) {
+        throw new Error(`Google Custom Search API error: ${response.status}`);
+      }
+
+      const data = await response.json();
+      const eventResults: SearchResult[] = [];
+
+      if (data.items && Array.isArray(data.items)) {
+        for (const item of data.items) {
+          try {
+            // Process each search result
+            const eventData = this.extractEventData({
+              title: item.title,
+              description: item.snippet,
+              link: item.link
+            });
+
+            if (eventData) {
+              eventResults.push(eventData);
+            }
+          } catch (error) {
+            console.error('Error processing Custom Search result:', error);
+          }
+        }
+      }
+
+      return eventResults;
+    } catch (error) {
+      console.error('Google Custom Search API error:', error);
+      return [];
+    }
   }
 }
 
