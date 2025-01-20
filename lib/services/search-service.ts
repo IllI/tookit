@@ -735,6 +735,11 @@ export class SearchService extends EventEmitter {
                           continue;
                         }
 
+                        // Ensure VividSeats URLs have the full base URL
+                        const fullEventUrl = service === 'vividseats' && !eventUrl.startsWith('http') 
+                          ? `https://www.vividseats.com${eventUrl}`
+                          : eventUrl;
+
                         // Check venue match first
                         const venueMatch = this.compareVenues(result.venue, bestEvent.venue);
                         if (!venueMatch) {
@@ -776,7 +781,7 @@ export class SearchService extends EventEmitter {
                             venue: result.venue,
                             date: result.date,
                             multipleEvents,
-                            url: eventUrl
+                            url: fullEventUrl
                         });
 
                         // Save the event link first
@@ -785,7 +790,7 @@ export class SearchService extends EventEmitter {
                           .insert({
                             event_id: savedEvent.id,
                             source: service,
-                            url: eventUrl
+                            url: fullEventUrl
                           });
 
                         if (linkError) {
@@ -793,7 +798,7 @@ export class SearchService extends EventEmitter {
                         }
 
                         // Process tickets for this match and stop searching
-                        await this.processEventPage(savedEvent.id, service, eventUrl, searchHtml);
+                        await this.processEventPage(savedEvent.id, service, fullEventUrl, searchHtml);
                         foundMatches = true;
                         break;
                       } catch (error) {
