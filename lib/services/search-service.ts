@@ -338,7 +338,7 @@ export class SearchService extends EventEmitter {
       console.log('Parsed ticket data:', parsedData);
 
       // Convert ticket data to database format
-      const tickets = parsedData.tickets.map(ticket => ({
+      const tickets = parsedData.tickets?.map(ticket => ({
         section: ticket.section,
         row: ticket.row || '',
         price: ticket.price,
@@ -346,7 +346,7 @@ export class SearchService extends EventEmitter {
         source,
         ticket_url: url,
         listing_id: ticket.listing_id || crypto.randomUUID()
-      }));
+      })) || [];
 
       if (tickets.length) {
         // Save tickets to database
@@ -760,7 +760,7 @@ export class SearchService extends EventEmitter {
                       }
 
                       // Process tickets for this match and stop searching
-                      await this.processEventPage(savedEvent.id, service, fullEventUrl, searchHtml);
+                      await this.processEventPage(savedEvent.id, service, fullEventUrl);
                       foundMatches = true;
                       break;
                     } catch (error) {
