@@ -38,3 +38,24 @@ export interface SearchMetadata {
   error?: string;
   eventId?: string;
 }
+
+export interface EventSearchResult {
+  name: string;
+  date: string;
+  venue: string;
+  location?: {
+    city: string;
+    state: string;
+    country: string;
+  };
+  source?: string;
+  link?: string;
+  description?: string;
+  ticket_links: Array<{
+    source: string;
+    url: string;
+    is_primary: boolean;
+  }>;
+  has_ticketmaster: boolean;
+  url?: string;
+}

@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events';
 import type { SearchParams, SearchResult } from '../types/api';
-import type { Event, TicketData, EventData, SearchMetadata } from '@/lib/types/schemas';
+import type { Event, TicketData, EventData, SearchMetadata, EventSearchResult } from '../types/schemas';
 import { createClient } from '@supabase/supabase-js';
 import { config } from '@/src/config/env';
 import { webReaderService } from './parsehub-service';
@@ -38,27 +38,6 @@ interface DbTicket {
     state: string;
     country: string;
   };
-}
-
-interface EventSearchResult {
-  name: string;
-  date: string;
-  venue: string;
-  location?: {
-    city: string;
-    state: string;
-    country: string;
-  };
-  source?: string;
-  link?: string;
-  description?: string;
-  ticket_links: Array<{
-    source: string;
-    url: string;
-    is_primary: boolean;
-  }>;
-  has_ticketmaster: boolean;
-  url?: string;
 }
 
 // Add internal result type
@@ -355,34 +334,21 @@ export class SearchService extends EventEmitter {
       console.log(`Processing ${source} event page (${html.length} bytes)`);
 
       // Parse tickets using Gemini
-      const parsedData = await this.parser.parseContent(
-        html,
-        url,
-        { keyword: '', location: '' },
-        true // true indicates this is an event page
-      );
+      const parsedData = await this.parser.parseTickets(html);
       console.log('Parsed ticket data:', parsedData);
 
-      interface TicketListing {
-        section: string;
-        row?: string;
-        price: number;
-        quantity: number;
-        listing_id?: string;
-      }
+      // Convert ticket data to database format
+      const tickets = parsedData.tickets.map(ticket => ({
+        section: ticket.section,
+        row: ticket.row || '',
+        price: ticket.price,
+        quantity: ticket.quantity,
+        source,
+        ticket_url: url,
+        listing_id: ticket.listing_id || crypto.randomUUID()
+      }));
 
-      // Type assertion since we know the response format for ticket pages
-      const ticketData = parsedData as unknown as { tickets: TicketListing[] };
-
-      if (ticketData.tickets?.length) {
-        // Format tickets with source and URL
-        const tickets = ticketData.tickets.map(ticket => ({
-          ...ticket,
-          source,
-          ticket_url: url,
-          listing_id: ticket.listing_id || crypto.randomUUID() // Ensure listing_id is always a string
-        }));
-
+      if (tickets.length) {
         // Save tickets to database
         await this.saveTickets(eventId, tickets);
         
@@ -514,7 +480,25 @@ export class SearchService extends EventEmitter {
         this.emit('status', `Found ${searchResults.length} events via DuckDuckGo`);
         
         // Format tickets with event data for frontend
-        const formattedResults: EventSearchResult[] = searchResults.map(result => ({
+        const formattedResults: EventSearchResult[] = searchResults.map((result: { 
+          name: string;
+          date: string;
+          venue: string;
+          location?: {
+            city: string;
+            state: string;
+            country: string;
+          };
+          source?: string;
+          link?: string;
+          description?: string;
+          ticket_links: Array<{
+            source: string;
+            url: string;
+            is_primary: boolean;
+          }>;
+          has_ticketmaster: boolean;
+        }) => ({
           name: result.name,
           date: result.date,
           venue: result.venue,
@@ -527,8 +511,7 @@ export class SearchService extends EventEmitter {
           link: result.link,
           description: result.description,
           ticket_links: result.ticket_links || [],
-          has_ticketmaster: result.has_ticketmaster || false,
-          url: result.url
+          has_ticketmaster: result.has_ticketmaster || false
         }));
         
         // Filter results by location and keyword
@@ -746,8 +729,9 @@ export class SearchService extends EventEmitter {
                     // For each search result, try to match it with our event
                     for (const result of searchResults) {
                       try {
-                        if (!result.url) {
-                          console.log('Search result missing URL, skipping');
+                        const eventUrl = result.url || result.link;
+                        if (!eventUrl) {
+                          console.log('Search result missing URL (checked both url and link properties), skipping');
                           continue;
                         }
 
@@ -791,7 +775,8 @@ export class SearchService extends EventEmitter {
                             resultName: result.name,
                             venue: result.venue,
                             date: result.date,
-                            multipleEvents
+                            multipleEvents,
+                            url: eventUrl
                         });
 
                         // Save the event link first
@@ -800,7 +785,7 @@ export class SearchService extends EventEmitter {
                           .insert({
                             event_id: savedEvent.id,
                             source: service,
-                            url: result.url
+                            url: eventUrl
                           });
 
                         if (linkError) {
@@ -808,7 +793,7 @@ export class SearchService extends EventEmitter {
                         }
 
                         // Process tickets for this match and stop searching
-                        await this.processEventPage(savedEvent.id, service, result.url, searchHtml);
+                        await this.processEventPage(savedEvent.id, service, eventUrl, searchHtml);
                         foundMatches = true;
                         break;
                       } catch (error) {
@@ -924,52 +909,162 @@ export class SearchService extends EventEmitter {
       }
       console.log(`Received HTML from ${source} (${html.length} bytes)`);
 
-      // Determine if this is an event page or search page
-      const isEventPage = url.includes('/event/') || url.includes('/production/');
-      
       // Use Gemini to extract data
-      const parsedEvents = await this.parser.parseContent(html, url, {
-        keyword: params.keyword,
-        location: params.location || ''
-      }, isEventPage);
+      const parsedEvents = await this.parser.parseEvents(html);
 
       if (!parsedEvents.events.length) {
         console.log('No events found by Gemini parser');
-        // Fall back to regex-based extraction
-        return this.extractEventDataWithRegex(html, source, url);
+        // Fall back to Cheerio-based extraction
+        const $ = cheerio.load(html);
+        const events: EventSearchResult[] = [];
+
+        // Extract event links based on source
+        if (source === 'stubhub') {
+          // Find all event cards in the grid
+          const eventCards = $('[data-testid="primaryGrid"] [data-testid="eventCard"]');
+          console.log(`Found ${eventCards.length} StubHub event cards`);
+          
+          eventCards.each((_, card) => {
+            const $card = $(card);
+            // The link is directly on the card or inside it
+            const $link = $card.is('a') ? $card : $card.find('a').first();
+            const href = $link.attr('href');
+            
+            if (!href) {
+              console.log('No href found for StubHub event card');
+              return;
+            }
+            
+            const eventUrl = href.startsWith('http') ? href : `https://www.stubhub.com${href}`;
+            const name = $card.find('[data-testid="eventTitle"]').text().trim() || 
+                        $card.find('h3').text().trim();
+            const dateText = $card.find('[data-testid="eventDate"]').text().trim() || 
+                           $card.find('time').text().trim();
+            const venueText = $card.find('[data-testid="eventVenue"]').text().trim() || 
+                            $card.find('span:contains("•")').text().split('•')[0]?.trim();
+            
+            // Normalize the date with proper time
+            const normalizedDate = normalizeDateTime(dateText);
+            if (!normalizedDate) {
+              console.log(`Invalid date format for StubHub event: ${dateText}`);
+              return;
+            }
+
+            console.log('Found StubHub event:', { eventUrl, name, date: normalizedDate, venueText });
+            
+            if (name && eventUrl) {
+              events.push({
+                name,
+                date: normalizedDate,
+                venue: venueText || 'TBD',
+                source,
+                link: eventUrl,
+                ticket_links: [{
+                  source,
+                  url: eventUrl,
+                  is_primary: false
+                }],
+                has_ticketmaster: false
+              });
+            }
+          });
+        } else if (source === 'vividseats') {
+          // Find all production cards
+          const productionCards = $('[data-testid="productions-list"] [data-testid="production-card"]');
+          console.log(`Found ${productionCards.length} VividSeats production cards`);
+          
+          productionCards.each((_, card) => {
+            const $card = $(card);
+            // Find the first link in the card
+            const $link = $card.find('a').first();
+            const href = $link.attr('href');
+            
+            if (!href) {
+              console.log('No href found for VividSeats production card');
+              return;
+            }
+            
+            const eventUrl = href.startsWith('http') ? href : `https://www.vividseats.com${href}`;
+            // Try both data-testid and class selectors
+            const name = $card.find('[data-testid="production-name"]').text().trim() || 
+                        $card.find('.production-name').text().trim();
+            const dateText = $card.find('[data-testid="production-date"]').text().trim() || 
+                           $card.find('.production-date').text().trim();
+            const venueText = $card.find('[data-testid="production-venue"]').text().trim() || 
+                            $card.find('.production-venue').text().trim();
+            
+            // Normalize the date with proper time
+            const normalizedDate = normalizeDateTime(dateText);
+            if (!normalizedDate) {
+              console.log(`Invalid date format for VividSeats event: ${dateText}`);
+              return;
+            }
+
+            console.log('Found VividSeats event:', { eventUrl, name, date: normalizedDate, venueText });
+            
+            if (name && eventUrl) {
+              events.push({
+                name,
+                date: normalizedDate,
+                venue: venueText || 'TBD',
+                source,
+                link: eventUrl,
+                ticket_links: [{
+                  source,
+                  url: eventUrl,
+                  is_primary: false
+                }],
+                has_ticketmaster: false
+              });
+            }
+          });
+        }
+
+        console.log(`Extracted ${events.length} events using Cheerio parser`);
+        return events;
       }
 
       // Convert parsed events to our internal format
       const validEvents = parsedEvents.events
-        .filter((event: any) => event.url) // Filter out events without URLs first
-        .map((event: any) => ({
-          name: event.name,
-          date: event.date,
-          venue: event.venue,
-          location: event.location ? {
-            city: event.location.split(',')[0]?.trim() || '',
-            state: event.location.split(',')[1]?.trim() || '',
-            country: 'US'
-          } : undefined,
-          source,
-          link: event.url,
-          ticket_links: [{
+        .filter((event: any) => event.eventUrl || url)
+        .map((event: any) => {
+          // Ensure we have a complete date with time
+          let eventDate = normalizeDateTime(event.date);
+          if (!eventDate) {
+            // If we only have a year, default to January 1st of that year
+            if (/^\d{4}$/.test(event.date)) {
+              eventDate = `${event.date}-01-01T00:00:00Z`;
+            } else {
+              console.log(`Invalid date format for event: ${event.date}`);
+              eventDate = new Date().toISOString(); // Fallback to current date
+            }
+          }
+
+          return {
+            name: event.name,
+            date: eventDate,
+            venue: event.venue,
+            location: event.location ? {
+              city: event.location.split(',')[0]?.trim() || '',
+              state: event.location.split(',')[1]?.trim() || '',
+              country: 'US'
+            } : undefined,
             source,
-            url: event.url,
-            is_primary: source === 'ticketmaster' || source === 'livenation'
-          }],
-          has_ticketmaster: source === 'ticketmaster' || source === 'livenation',
-          url: event.url
-        } as EventSearchResult));
+            link: event.eventUrl || url,
+            description: event.price ? `Tickets from ${event.price}` : undefined,
+            ticket_links: [{
+              source,
+              url: event.eventUrl || url,
+              is_primary: source === 'ticketmaster' || source === 'livenation'
+            }],
+            has_ticketmaster: source === 'ticketmaster' || source === 'livenation'
+          };
+        });
 
       return validEvents;
 
     } catch (error) {
       console.error(`Error searching ${source}:`, error);
-      // Fall back to regex-based extraction on error if we have HTML
-      if (html) {
-        return this.extractEventDataWithRegex(html, source, url);
-      }
       return [];
     }
   }
@@ -1480,11 +1575,48 @@ export class SearchService extends EventEmitter {
                      text.match(/^([^\n]+)/);
       const name = nameMatch ? nameMatch[1].trim() : '';
 
-      // Extract date (look for common date formats)
-      const dateMatch = text.match(/Date:?\s*([^\n]+)/i) ||
-                     text.match(/\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]* \d{1,2},? \d{4}\b/i) ||
-                     text.match(/\b\d{4}-\d{2}-\d{2}\b/);
-      const date = dateMatch ? normalizeDateTime(dateMatch[1] || dateMatch[0]) : '';
+      // Extract date and time using multiple patterns
+      let dateStr = '';
+      let timeStr = '';
+
+      // Try to extract from Ticketmaster URL first (most reliable)
+      if (url.includes('ticketmaster.com')) {
+        const urlDateMatch = url.match(/(\d{2})-(\d{2})-(\d{4})/);
+        if (urlDateMatch) {
+          const [_, month, day, year] = urlDateMatch;
+          dateStr = `${year}-${month}-${day}`;
+        }
+      }
+
+      // If no date in URL, look in text
+      if (!dateStr) {
+        const dateMatch = text.match(/Date:?\s*([^\n]+)/i) ||
+                       text.match(/\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]* \d{1,2},? \d{4}\b/i) ||
+                       text.match(/\b\d{4}-\d{2}-\d{2}\b/);
+        dateStr = dateMatch ? dateMatch[1] || dateMatch[0] : '';
+      }
+
+      // Look for time in the description
+      const timeMatch = text.match(/\b(\d{1,2}):(\d{2})\s*(am|pm)\b/i) ||
+                       text.match(/\b(\d{1,2})\s*(am|pm)\b/i);
+      
+      if (timeMatch) {
+        let hours = parseInt(timeMatch[1]);
+        const minutes = timeMatch[2]?.match(/\d{2}/) ? timeMatch[2] : '00';
+        const meridiem = ((timeMatch[2]?.match(/am|pm/i) || timeMatch[3]) || '').toString().toLowerCase();
+        
+        // Convert to 24-hour format
+        if (meridiem === 'pm' && hours < 12) hours += 12;
+        if (meridiem === 'am' && hours === 12) hours = 0;
+        
+        timeStr = `${hours.toString().padStart(2, '0')}:${minutes}:00`;
+      } else {
+        // Default to 19:00 (7 PM) for evening events if no time found
+        timeStr = '19:00:00';
+      }
+
+      // Combine date and time
+      const date = dateStr ? normalizeDateTime(`${dateStr} ${timeStr}`) : '';
 
       // Extract venue
       const venueMatch = text.match(/Venue:?\s*([^\n]+)/i) ||
