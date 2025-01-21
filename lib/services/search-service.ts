@@ -322,15 +322,53 @@ export class SearchService extends EventEmitter {
     }
   }
 
-  async processEventPage(eventId: string, source: string, url: string, html?: string): Promise<void> {
+  async processEventPage(eventId: string, source: string, url: string): Promise<void> {
     try {
-      // Get HTML from Jina Reader only if not provided
-      if (!html) {
+      let html: string;
+      
+      // Use Zyte only for VividSeats event pages (not search pages)
+      if (source === 'vividseats' && !url.includes('/search?')) {
+        console.log(`Fetching VividSeats event page from Zyte: ${url}`);
+        const response = await fetch('https://api.zyte.com/v1/extract', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Basic ${Buffer.from(config.ZYTE_API_KEY).toString('base64')}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            url: url,
+            browserHtml: true,
+            actions: [{
+              action: 'waitForSelector',
+              selector: '[data-testid="listings-container"]',
+              timeout: 30000
+            }]
+          })
+        });
+
+        if (!response.ok) {
+          console.error(`Zyte API error: ${response.status} ${response.statusText}`);
+          throw new Error(`Zyte API error: ${response.status} ${response.statusText}`);
+        }
+
+        const data = await response.json();
+        console.log('Zyte API response:', JSON.stringify(data, null, 2));
+        
+        if (!data || typeof data !== 'object') {
+          throw new Error('Invalid response from Zyte API');
+        }
+        
+        if (!data.browserHtml || typeof data.browserHtml !== 'string') {
+          throw new Error('No valid HTML content returned from Zyte API');
+        }
+        
+        html = data.browserHtml;
+      } else {
+        // Use Jina Reader for all other sources and VividSeats search pages
         console.log(`Fetching event page from Jina Reader: ${url}`);
         html = await webReaderService.fetchPage(url);
-      } else {
-        console.log(`Using provided HTML for event page: ${url}`);
       }
+
       console.log(`Processing ${source} event page (${html.length} bytes)`);
 
       // Parse tickets using Gemini
