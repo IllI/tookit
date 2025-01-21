@@ -58,8 +58,20 @@ class WebReaderService {
       const selectors = this.getSelectors(url);
       console.log('Using selectors:', selectors);
 
-      // Parse URL to get hostname and path
-      const proxyUrl = new URL(`https://r.jina.ai/${url}`);
+      // Check if this is a VividSeats event page (not search)
+      const isVividSeatsEvent = url.includes('vividseats.com') && 
+                               url.includes('/tickets/') && 
+                               !url.includes('/search?');
+
+      // Use cors.sh for VividSeats event pages, Jina for everything else
+      const proxyUrl = isVividSeatsEvent ? 
+        new URL(`https://cors.sh/?${url}`) :
+        new URL(`https://r.jina.ai/${url}`);
+
+      // Only add proxy for Jina requests
+      if (!isVividSeatsEvent) {
+        options.headers ? options.headers['X-Proxy-Url'] = '47.251.122.81:8888' : options.headers = {'X-Proxy-Url': '47.251.122.81:8888'};
+      }
 
       const response = await fetch(proxyUrl, {
         method: 'GET',

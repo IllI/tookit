@@ -160,17 +160,36 @@ export class SearchService extends EventEmitter {
 
   async saveTickets(eventId: string, tickets: TicketData[]) {
     try {
-      const formattedTickets = tickets.map(ticket => ({
-        event_id: eventId,
-        section: ticket.section || '',
-        row: ticket.row || '',
-        price: parseFloat(ticket.price.toString()),
-        quantity: parseInt(ticket.quantity?.toString() || '1'),
-        source: ticket.source,
-        listing_id: ticket.listing_id || crypto.randomUUID(),
-        ticket_url: ticket.source === 'vividseats' ? ticket.ticket_url : null,
-        created_at: new Date().toISOString()
-      }));
+      const formattedTickets = tickets.map(ticket => {
+        // Ensure price is a valid number
+        let price = 0;
+        if (typeof ticket.price === 'number') {
+          price = ticket.price;
+        } else if (typeof ticket.price === 'string') {
+          // Remove currency symbols and convert to number
+          price = parseFloat(ticket.price.replace(/[^0-9.]/g, ''));
+        }
+
+        // Ensure quantity is a valid number
+        let quantity = 1;
+        if (typeof ticket.quantity === 'number') {
+          quantity = ticket.quantity;
+        } else if (typeof ticket.quantity === 'string') {
+          quantity = parseInt(ticket.quantity.replace(/[^0-9]/g, '')) || 1;
+        }
+
+        return {
+          event_id: eventId,
+          section: ticket.section || '',
+          row: ticket.row || '',
+          price: price || 0,
+          quantity: quantity,
+          source: ticket.source,
+          listing_id: ticket.listing_id || crypto.randomUUID(),
+          ticket_url: ticket.source === 'vividseats' ? ticket.ticket_url : null,
+          created_at: new Date().toISOString()
+        };
+      });
 
       console.log('Saving tickets to database:', formattedTickets);
       
@@ -238,87 +257,29 @@ export class SearchService extends EventEmitter {
   }
 
   private async emitAllTickets(eventId: string) {
-    // Get ALL tickets for this event from ALL sources, including event links
-    const { data: tickets, error: ticketsError } = await this.supabase
-      .from('tickets')
-      .select(`
-        id,
-        event_id,
-        section,
-        row,
-        price,
-        quantity,
-        source,
-        listing_id,
-        ticket_url,
-        event:events (
-          id,
-          name,
-          date,
-          venue,
-          city,
-          state,
-          country,
-          event_links (
-            source,
-            url
-          )
-        )
-      `)
-      .eq('event_id', eventId)
-      .order('price');
+    try {
+      // Validate UUID format
+      const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+      if (!UUID_REGEX.test(eventId)) {
+        console.error('Invalid event ID format for emitting tickets:', eventId);
+        this.emit('tickets', []);
+        return;
+      }
 
-    if (ticketsError) {
-      console.error('Error fetching all tickets:', ticketsError);
-      return;
-    }
-
-    if (tickets?.length) {
-      // Format tickets with event data for frontend
-      const allTicketsWithEvent = tickets.map((ticket: any) => {
-        // Find the event link for this ticket's source
-        const eventLink = ticket.event.event_links?.find((link: any) => link.source === ticket.source);
-        
-        // Use ticket-specific URL if available, otherwise fall back to event URL
-        const ticketUrl = ticket.ticket_url || (eventLink ? eventLink.url : null);
-
-        // Format the date string to remove timezone and preserve local time
-        const dateStr = ticket.event.date.replace(/[+-]\d{2}:?\d{2}$/, '');
-        const [datePart, timePart] = dateStr.split(' ');
-        const [year, month, day] = datePart.split('-').map(Number);
-        const [hours, minutes] = timePart ? timePart.split(':').map(Number) : [0, 0];
-        const localDate = new Date(year, month - 1, day, hours, minutes);
-        const formattedDate = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')} ${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:00`;
-
-        // Add a label for Ticketmaster/LiveNation tickets
-        const isTicketmaster = ticket.source === 'ticketmaster' || ticket.source === 'livenation';
-        const priceLabel = isTicketmaster ? 'Face value price' : 'Price';
-
-        return {
-          id: ticket.id,
-          name: ticket.event.name,
-          date: formattedDate,
-          venue: ticket.event.venue,
-          location: {
-            city: ticket.event.city,
-            state: ticket.event.state,
-            country: ticket.event.country
-          },
-          section: ticket.section,
-          row: ticket.row || '',
-          price: parseFloat(ticket.price.toString()),
-          price_label: priceLabel,
-          quantity: parseInt(ticket.quantity.toString()),
-          source: ticket.source,
-          listing_id: ticket.listing_id,
-          ticket_url: ticketUrl
-        };
-      });
+      const allTicketsWithEvent = await this.getAllTickets(eventId);
+      
+      if (!allTicketsWithEvent || allTicketsWithEvent.length === 0) {
+        console.log('No tickets found for event:', eventId);
+        this.emit('tickets', []);
+        return;
+      }
 
       console.log('Found total tickets:', allTicketsWithEvent.length);
-      // Emit ALL tickets to frontend
       this.emit('tickets', allTicketsWithEvent);
       console.log(`Emitted ${allTicketsWithEvent.length} total tickets to frontend`);
+    } catch (error) {
+      console.error('Error emitting tickets:', error);
+      this.emit('tickets', []);
     }
   }
 
@@ -326,45 +287,15 @@ export class SearchService extends EventEmitter {
     try {
       let html: string;
       
-      // Use Zyte only for VividSeats event pages (not search pages)
+      // Use cors.sh for VividSeats event pages, Jina Reader for others
       if (source === 'vividseats' && !url.includes('/search?')) {
-        console.log(`Fetching VividSeats event page from Zyte: ${url}`);
-        const response = await fetch('https://api.zyte.com/v1/extract', {
-          method: 'POST',
-          headers: {
-            'Authorization': `Basic ${Buffer.from(config.ZYTE_API_KEY).toString('base64')}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            url: url,
-            browserHtml: true,
-            actions: [{
-              action: 'waitForSelector',
-              selector: '[data-testid="listings-container"]',
-              timeout: 30000
-            }]
-          })
-        });
-
+        console.log(`Fetching VividSeats event page from cors.sh: ${url}`);
+        const response = await fetch(`https://cors.sh/?${url}`);
         if (!response.ok) {
-          console.error(`Zyte API error: ${response.status} ${response.statusText}`);
-          throw new Error(`Zyte API error: ${response.status} ${response.statusText}`);
+          throw new Error(`cors.sh error: ${response.status} ${response.statusText}`);
         }
-
-        const data = await response.json();
-        console.log('Zyte API response:', JSON.stringify(data, null, 2));
-        
-        if (!data || typeof data !== 'object') {
-          throw new Error('Invalid response from Zyte API');
-        }
-        
-        if (!data.browserHtml || typeof data.browserHtml !== 'string') {
-          throw new Error('No valid HTML content returned from Zyte API');
-        }
-        
-        html = data.browserHtml;
+        html = await response.text();
       } else {
-        // Use Jina Reader for all other sources and VividSeats search pages
         console.log(`Fetching event page from Jina Reader: ${url}`);
         html = await webReaderService.fetchPage(url);
       }
@@ -647,11 +578,13 @@ export class SearchService extends EventEmitter {
         console.log('All collected ticket links:', Array.from(allTicketLinks.values()));
 
         // Save initial event to database
+        const eventId = crypto.randomUUID();
         const { data: savedEvent, error: saveError } = await this.supabase
           .from('events')
           .upsert({
+            id: eventId,
             name: bestEvent.name,
-            date: bestEvent.date, // Keep the full ISO string with time
+            date: bestEvent.date,
             venue: bestEvent.venue,
             city: bestEvent.location?.city || '',
             state: bestEvent.location?.state || '',
@@ -1397,6 +1330,13 @@ export class SearchService extends EventEmitter {
 
   // Public method to get all tickets for an event
   async getAllTickets(eventId: string) {
+    // Validate UUID format
+    const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    if (!UUID_REGEX.test(eventId)) {
+      console.error('Invalid event ID format:', eventId);
+      return [];
+    }
+
     const { data: tickets, error } = await this.supabase
       .from('tickets')
       .select(`

@@ -15,6 +15,7 @@ interface ParsedTicket {
   price: number;
   quantity: number;
   listing_id?: string;
+  ticket_url?: string;
 }
 
 interface ParsedEvents {
@@ -47,20 +48,16 @@ Return only valid JSON in this format:
   ]
 }`;
 
-const TICKET_PROMPT = `Extract ticket listings from the HTML content. For VividSeats pages, look for anchor tags (<a>) that contain ticket listing information.
+const TICKET_PROMPT = `Extract ticket listings from the HTML content. For VividSeats pages:
 
-Each ticket listing should have:
-- section: The section name/number (look for text containing "Section" or similar)
-- row: The row name/number (look for text containing "Row" or similar)
-- price: The ticket price (numeric value only, no currency symbols)
-- quantity: Number of tickets available
-- listing_id: Generate a unique ID for each listing
-
-For VividSeats pages:
-1. Each ticket listing is typically wrapped in an anchor tag
-2. Look for price information near or within the anchor tag
-3. Section and row information may be in the link text or nearby elements
-4. The listing URL is in the href attribute
+1. Look for ticket listings in the container with data-testid="listings-container"
+2. Each listing should contain:
+   - Section name (often prefixed with "Section" or near a section label)
+   - Row information (if available, often prefixed with "Row" or near a row label)
+   - Price (numeric value only, no currency symbols)
+   - Quantity of tickets available
+   - A unique listing ID (can be extracted from data attributes or generated)
+   - The direct ticket URL from the listing's anchor tag href attribute
 
 Return only valid JSON in this format:
 {
@@ -70,10 +67,21 @@ Return only valid JSON in this format:
       "row": "string",
       "price": number,
       "quantity": number,
-      "listing_id": "string"
+      "listing_id": "string",
+      "ticket_url": "string"
     }
   ]
-}`;
+}
+
+Important:
+1. Remove any currency symbols from prices
+2. Convert all prices to numbers
+3. Ensure quantities are numbers
+4. Include section names exactly as shown
+5. Include row information if available
+6. Look for data-testid attributes to identify ticket elements
+7. Extract the full href URL from each ticket listing's anchor tag
+8. For relative URLs (starting with '/'), prepend 'https://www.vividseats.com'`;
 
 class GeminiParser {
   private apiKey: string;

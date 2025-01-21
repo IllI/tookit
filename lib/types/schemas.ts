@@ -16,12 +16,11 @@ export interface Event {
 export interface TicketData {
   section: string;
   row?: string;
-  price: number;
-  quantity: number;
-  listing_id: string;
+  price: number | string;
+  quantity: number | string;
   source: string;
-  event_id?: string;
-  ticket_url?: string | null;
+  listing_id?: string;
+  ticket_url?: string;
 }
 
 export interface EventData extends Event {
