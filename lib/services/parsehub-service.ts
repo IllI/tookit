@@ -65,17 +65,27 @@ class WebReaderService {
 
       // Use cors.sh for VividSeats event pages, Jina for everything else
       const proxyUrl = isVividSeatsEvent ? 
-        new URL(`https://cors.sh/?${url}`) :
-        new URL(`https://r.jina.ai/${url}`);
+        `https://cors.sh/${url}` :
+        `https://r.jina.ai/${url}`;
 
       // Only add proxy for Jina requests
       if (!isVividSeatsEvent) {
         options.headers ? options.headers['X-Proxy-Url'] = '47.251.122.81:8888' : options.headers = {'X-Proxy-Url': '47.251.122.81:8888'};
+      } else {
+        // Add cors.sh headers for VividSeats event pages
+        options.headers = {
+          'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+          'accept-language': 'en-US,en;q=0.9',
+          'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+          'sec-ch-ua-mobile': '?0',
+          'sec-ch-ua-platform': '"Windows"'
+        };
       }
 
       const response = await fetch(proxyUrl, {
         method: 'GET',
-        headers: {
+        headers: isVividSeatsEvent ? options.headers : {
           'Accept': 'application/json',
           'X-Return-Format': 'html',
           'X-Target-Selector': selectors.targetSelector,
