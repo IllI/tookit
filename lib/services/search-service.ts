@@ -290,7 +290,7 @@ export class SearchService extends EventEmitter {
       // Use cors.sh for VividSeats event pages, Jina Reader for others
       if (source === 'vividseats' && !url.includes('/search?')) {
         console.log(`Fetching VividSeats event page from cors.sh: ${url}`);
-        const response = await fetch(`https://cors.sh/?${url}`);
+        const response = await fetch(`https://proxy.cors.sh/?${url}`);
         if (!response.ok) {
           throw new Error(`cors.sh error: ${response.status} ${response.statusText}`);
         }

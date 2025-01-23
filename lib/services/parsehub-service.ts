@@ -65,7 +65,7 @@ class WebReaderService {
 
       // Use cors.sh for VividSeats event pages, Jina for everything else
       const proxyUrl = isVividSeatsEvent ? 
-        `https://cors.sh/${url}` :
+        `https://proxy.cors.sh/${url}` :
         `https://r.jina.ai/${url}`;
 
       // Only add proxy for Jina requests
