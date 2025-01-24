@@ -10,6 +10,7 @@ import * as cheerio from 'cheerio';
 import { getParser } from './llm-service';
 import * as fs from 'fs';
 import * as path from 'path';
+import { fetchWithCorsProxy } from '../utils/proxy-utils';
 
 interface DbEvent {
   id: string;
@@ -278,10 +279,13 @@ export class SearchService extends EventEmitter {
         return;
       }
 
-      console.log('Found total tickets:', allTicketsWithEvent.length);
-      this.lastEmittedTickets = allTicketsWithEvent;
-      this.emit('tickets', allTicketsWithEvent);
-      console.log(`Emitted ${allTicketsWithEvent.length} total tickets to frontend`);
+      // Sort tickets by price
+      const sortedTickets = [...allTicketsWithEvent].sort((a, b) => a.price - b.price);
+
+      console.log('Found total tickets:', sortedTickets.length);
+      this.lastEmittedTickets = sortedTickets;
+      this.emit('tickets', sortedTickets);
+      console.log(`Emitted ${sortedTickets.length} total tickets to frontend`);
     } catch (error) {
       console.error('Error emitting tickets:', error);
       this.emit('tickets', []);
@@ -305,26 +309,7 @@ export class SearchService extends EventEmitter {
       // Use cors.sh for VividSeats event pages, Jina Reader for others
       if (source === 'vividseats' && !url.includes('/search?')) {
         console.log(`Fetching VividSeats event page from cors.sh: ${url}`);
-        const response = await fetch(`https://proxy.cors.sh/${url}`, {
-          headers: {
-            'accept': 'application/json, text/plain, */*',
-            'accept-language': 'en-US,en;q=0.9',
-            'origin': 'https://cors.sh',
-            'priority': 'u=1, i',
-            'referer': 'https://cors.sh/',
-            'sec-ch-ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
-            'sec-ch-ua-mobile': '?0',
-            'sec-ch-ua-platform': '"Windows"',
-            'sec-fetch-dest': 'empty',
-            'sec-fetch-mode': 'cors',
-            'sec-fetch-site': 'same-site',
-            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
-          }
-        });
-        if (!response.ok) {
-          throw new Error(`cors.sh error: ${response.status} ${response.statusText}`);
-        }
-        html = await response.text() as string;
+        html = await fetchWithCorsProxy(url);
         
         // Save response to temp file for inspection
         const tempDir = path.join(process.cwd(), 'temp');
