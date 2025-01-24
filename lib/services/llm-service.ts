@@ -1,4 +1,5 @@
 import { config } from '@/src/config/env';
+import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from '@google/generative-ai';
 
 interface ParsedEvent {
   name: string;
@@ -48,40 +49,41 @@ Return only valid JSON in this format:
   ]
 }`;
 
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
+
 const TICKET_PROMPT = `Extract ticket listings from the HTML content. For VividSeats pages:
 
-1. Look for ticket listings in the container with data-testid="listings-container"
-2. Each listing should contain:
-   - Section name (often prefixed with "Section" or near a section label)
-   - Row information (if available, often prefixed with "Row" or near a row label)
-   - Price (numeric value only, no currency symbols)
-   - Quantity of tickets available
-   - A unique listing ID (can be extracted from data attributes or generated)
-   - The direct ticket URL from the listing's anchor tag href attribute
+If isPriceRange is true:
+1. Look for the knowledge graph script tag with type "application/ld+json"
+2. Find the "offers" object in the event data
+3. Extract the lowest price from the offers
+4. Return a single ticket with:
+   - price: The lowest price found
+   - quantity: 1
+   - section: "Best Available"
+   - row: ""
+   - listing_id: ""
 
-Return only valid JSON in this format:
+Otherwise:
+Extract individual ticket listings with:
+- section: The section of the ticket
+- row: The row of the ticket (if available)
+- price: The price of the ticket (numerical value)
+- quantity: Number of tickets available
+- listing_id: Unique identifier for the listing (if available)
+
+Return the data in this format:
 {
   "tickets": [
     {
-      "section": "string",
-      "row": "string",
+      "section": string,
+      "row": string,
       "price": number,
       "quantity": number,
-      "listing_id": "string",
-      "ticket_url": "string"
+      "listing_id": string
     }
   ]
-}
-
-Important:
-1. Remove any currency symbols from prices
-2. Convert all prices to numbers
-3. Ensure quantities are numbers
-4. Include section names exactly as shown
-5. Include row information if available
-6. Look for data-testid attributes to identify ticket elements
-7. Extract the full href URL from each ticket listing's anchor tag
-8. For relative URLs (starting with '/'), prepend 'https://www.vividseats.com'`;
+}`;
 
 class GeminiParser {
   private apiKey: string;
@@ -137,7 +139,7 @@ class GeminiParser {
     }
   }
 
-  async parseTickets(html: string): Promise<ParsedTickets> {
+  async parseTickets(html: string, isPriceRange: boolean = false): Promise<ParsedTickets> {
     try {
       if (!this.apiKey) {
         throw new Error('Gemini API key not found in environment variables');
@@ -151,7 +153,7 @@ class GeminiParser {
         body: JSON.stringify({
           contents: [{
             parts: [{
-              text: `${TICKET_PROMPT}\n\nHTML Content:\n${html}`
+              text: `${TICKET_PROMPT}\n\nHTML Content:\n${html}\n\nisPriceRange: ${isPriceRange}`
             }]
           }]
         })
@@ -168,14 +170,12 @@ class GeminiParser {
         const jsonMatch = text.match(/\{[\s\S]*\}/);
         if (!jsonMatch) {
           console.warn('No JSON found in Gemini response');
-          
           return { tickets: [] };
         }
-        console.log('Gemini response:', text);
-          console.log('HTML:', html);
         return JSON.parse(jsonMatch[0]);
       } catch (parseError) {
         console.error('Error parsing Gemini response as JSON:', parseError);
+        console.log('Raw response:', text);
         return { tickets: [] };
       }
     } catch (error) {

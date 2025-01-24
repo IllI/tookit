@@ -8,6 +8,8 @@ import { DuckDuckGoSearcher } from './duckduckgo-searcher';
 import { normalizeDateTime, areDatesMatching, doDateTimesMatch, isValidDate } from '../utils/date-utils';
 import * as cheerio from 'cheerio';
 import { getParser } from './llm-service';
+import * as fs from 'fs';
+import * as path from 'path';
 
 interface DbEvent {
   id: string;
@@ -283,18 +285,51 @@ export class SearchService extends EventEmitter {
     }
   }
 
-  async processEventPage(eventId: string, source: string, url: string): Promise<void> {
+  private isValidUrl(url: string | undefined): url is string {
+    return typeof url === 'string' && url.length > 0;
+  }
+
+  async processEventPage(eventId: string, source: string, url: string | undefined): Promise<void> {
     try {
+      if (!this.isValidUrl(url)) {
+        console.log('No URL provided for event page');
+        return;
+      }
+
       let html: string;
       
       // Use cors.sh for VividSeats event pages, Jina Reader for others
       if (source === 'vividseats' && !url.includes('/search?')) {
         console.log(`Fetching VividSeats event page from cors.sh: ${url}`);
-        const response = await fetch(`https://proxy.cors.sh/?${url}`);
+        const response = await fetch(`https://proxy.cors.sh/${url}`, {
+          headers: {
+            'accept': 'application/json, text/plain, */*',
+            'accept-language': 'en-US,en;q=0.9',
+            'origin': 'https://cors.sh',
+            'priority': 'u=1, i',
+            'referer': 'https://cors.sh/',
+            'sec-ch-ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"Windows"',
+            'sec-fetch-dest': 'empty',
+            'sec-fetch-mode': 'cors',
+            'sec-fetch-site': 'same-site',
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+          }
+        });
         if (!response.ok) {
           throw new Error(`cors.sh error: ${response.status} ${response.statusText}`);
         }
-        html = await response.text();
+        html = await response.text() as string;
+        
+        // Save response to temp file for inspection
+        const tempDir = path.join(process.cwd(), 'temp');
+        if (!fs.existsSync(tempDir)) {
+          fs.mkdirSync(tempDir);
+        }
+        const tempFile = path.join(tempDir, 'vividseats-response.html');
+        fs.writeFileSync(tempFile, html);
+        console.log(`Saved response HTML to: ${tempFile}`);
       } else {
         console.log(`Fetching event page from Jina Reader: ${url}`);
         html = await webReaderService.fetchPage(url);
@@ -302,8 +337,50 @@ export class SearchService extends EventEmitter {
 
       console.log(`Processing ${source} event page (${html.length} bytes)`);
 
+      // Parse the event page HTML
+      const $ = cheerio.load(html);
+
+      // For VividSeats event pages, handle both rendered and pre-rendered cases
+      let contentToProcess = html;
+      let isPriceRange = false;
+      if (source === 'vividseats') {
+        const listingsContainer = $('[data-testid="listings-container"]');
+        if (listingsContainer.length) {
+          // Case 1: Rendered page with ticket listings
+          const listingsHtml = listingsContainer.html() ?? '';
+          if (listingsHtml) {
+            contentToProcess = listingsHtml;
+            console.log(`Found listings container (${contentToProcess.length} bytes)`);
+          }
+        } else {
+          // Case 2: Pre-rendered page with knowledge graph
+          console.log('No listings container found, looking for knowledge graph data');
+          const scriptTags = $('script[type="application/ld+json"]');
+          let foundKnowledgeGraph = false;
+          scriptTags.each((_, element) => {
+            try {
+              const jsonContent = $(element).html() ?? '';
+              if (jsonContent) {
+                const eventData = JSON.parse(jsonContent);
+                if (eventData['@type'] === 'MusicEvent' && eventData.offers) {
+                  contentToProcess = jsonContent;
+                  isPriceRange = true;
+                  foundKnowledgeGraph = true;
+                  console.log('Found knowledge graph data with offers');
+                }
+              }
+            } catch (error) {
+              console.log('Error parsing script tag:', error);
+            }
+          });
+          if (!foundKnowledgeGraph) {
+            console.log('No knowledge graph data found, using full page HTML');
+          }
+        }
+      }
+
       // Parse tickets using Gemini
-      const parsedData = await this.parser.parseTickets(html);
+      const parsedData = await this.parser.parseTickets(contentToProcess, isPriceRange);
       console.log('Parsed ticket data:', parsedData);
 
       // Convert ticket data to database format
@@ -314,7 +391,8 @@ export class SearchService extends EventEmitter {
         quantity: ticket.quantity,
         source,
         ticket_url: url,
-        listing_id: ticket.listing_id || crypto.randomUUID()
+        listing_id: ticket.listing_id || crypto.randomUUID(),
+        price_range: isPriceRange
       })) || [];
 
       if (tickets.length) {
@@ -613,7 +691,7 @@ export class SearchService extends EventEmitter {
               .find(link => link.source === service);
 
             // If we have a valid direct link, process it
-            if (serviceLink && isValidEventUrl(serviceLink.url, service)) {
+            if (serviceLink?.url && isValidEventUrl(serviceLink.url, service)) {
               console.log(`Found direct ${service} event link:`, serviceLink.url);
               console.log(`Processing ${service} event page from direct link:`, serviceLink.url);
               await this.processEventPage(savedEvent.id, service, serviceLink.url);
