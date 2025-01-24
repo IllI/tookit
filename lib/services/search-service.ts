@@ -51,6 +51,7 @@ export class SearchService extends EventEmitter {
   private supabase;
   private duckDuckGoSearcher: DuckDuckGoSearcher;
   private parser;
+  private lastEmittedTickets: DbTicket[] = [];
 
   constructor() {
     super();
@@ -273,15 +274,18 @@ export class SearchService extends EventEmitter {
       if (!allTicketsWithEvent || allTicketsWithEvent.length === 0) {
         console.log('No tickets found for event:', eventId);
         this.emit('tickets', []);
+        this.lastEmittedTickets = [];
         return;
       }
 
       console.log('Found total tickets:', allTicketsWithEvent.length);
+      this.lastEmittedTickets = allTicketsWithEvent;
       this.emit('tickets', allTicketsWithEvent);
       console.log(`Emitted ${allTicketsWithEvent.length} total tickets to frontend`);
     } catch (error) {
       console.error('Error emitting tickets:', error);
       this.emit('tickets', []);
+      this.lastEmittedTickets = [];
     }
   }
 
@@ -1799,6 +1803,16 @@ export class SearchService extends EventEmitter {
       console.error('Error parsing event data:', error);
       return [];
     }
+  }
+
+  // Add a method to get the last emitted tickets
+  getLastEmittedTickets(): DbTicket[] {
+    return this.lastEmittedTickets;
+  }
+
+  // Add a method to get the sources from last emitted tickets
+  getLastEmittedSources(): string[] {
+    return Array.from(new Set(this.lastEmittedTickets.map(t => t.source)));
   }
 }
 
