@@ -694,145 +694,140 @@ export class SearchService extends EventEmitter {
             const serviceLink = Array.from(allTicketLinks.values())
               .find(link => link.source === service);
 
-            // If we have a valid direct link, process it
+            // If we have a valid direct link, process it and continue to next service
             if (serviceLink?.url && isValidEventUrl(serviceLink.url, service)) {
               console.log(`Found direct ${service} event link:`, serviceLink.url);
               console.log(`Processing ${service} event page from direct link:`, serviceLink.url);
               await this.processEventPage(savedEvent.id, service, serviceLink.url);
-            } else {
-              // If no valid direct link, we need to search the service
-              console.log(`No valid ${service} event link found, searching ${service} for event match`);
-              
-              // Create search terms that combine both the keyword and best event name
-              const searchTerms = [
-                params.keyword,
-                bestEvent.name,
-                // Extract artist/band name (usually before special characters)
-                bestEvent.name.split(/[-–—(]/)[0].trim()
-              ].filter((term): term is string => Boolean(term));
+              continue;  // Skip to next service after processing direct link
+            }
 
-              // Remove duplicates and very short terms
-              const uniqueSearchTerms = Array.from(new Set(searchTerms))
-                .filter(term => term.length > 2);
+            // If no valid direct link, we need to search the service
+            console.log(`No valid ${service} event link found, searching ${service} for event match`);
+            
+            // Create search terms that combine both the keyword and best event name
+            const searchTerms = [
+              params.keyword,
+              bestEvent.name,
+              // Extract artist/band name (usually before special characters)
+              bestEvent.name.split(/[-–—(]/)[0].trim()
+            ].filter((term): term is string => Boolean(term));
 
-              console.log('Using search terms:', uniqueSearchTerms);
+            // Remove duplicates and very short terms
+            const uniqueSearchTerms = Array.from(new Set(searchTerms))
+              .filter(term => term.length > 2);
 
-              const locationTerm = bestEvent.location?.city || params.location || '';
-              
-              // Try each search term until we find matches
-              let foundMatches = false;
-              for (const searchTerm of uniqueSearchTerms) {
-                if (foundMatches) break;
+            console.log('Using search terms:', uniqueSearchTerms);
 
-                const searchUrl = service === 'stubhub' ?
-                  `https://www.stubhub.com/secure/search?q=${encodeURIComponent(searchTerm)}+${encodeURIComponent(locationTerm)}` :
-                  `https://www.vividseats.com/search?searchTerm=${encodeURIComponent(searchTerm)}${locationTerm ? '+' + encodeURIComponent(locationTerm) : ''}`;
-                  
-                console.log(`Searching ${service} with term: "${searchTerm}"`);
-                const searchHtml = await webReaderService.fetchPage(searchUrl);
+            const locationTerm = bestEvent.location?.city || params.location || '';
+            
+            // Try each search term until we find matches
+            let foundMatches = false;
+            for (const searchTerm of uniqueSearchTerms) {
+              if (foundMatches) break;
+
+              const searchUrl = service === 'stubhub' ?
+                `https://www.stubhub.com/secure/search?q=${encodeURIComponent(searchTerm)}+${encodeURIComponent(locationTerm)}` :
+                `https://www.vividseats.com/search?searchTerm=${encodeURIComponent(searchTerm)}${locationTerm ? '+' + encodeURIComponent(locationTerm) : ''}`;
                 
-                // Parse the search results using the already fetched HTML
-                const searchResults = await this.searchSite(searchUrl, service, {
-                  keyword: searchTerm,
-                  location: locationTerm,
-                  html: searchHtml  // Pass the HTML we already have
-                });
+              console.log(`Searching ${service} with term: "${searchTerm}"`);
+              const searchHtml = await webReaderService.fetchPage(searchUrl);
+              
+              // Parse the search results using the already fetched HTML
+              const searchResults = await this.searchSite(searchUrl, service, {
+                keyword: searchTerm,
+                location: locationTerm,
+                html: searchHtml  // Pass the HTML we already have
+              });
 
-                if (searchResults.length > 0) {
-                  console.log(`Found ${searchResults.length} potential matches from ${service}`);
+              if (searchResults.length > 0) {
+                console.log(`Found ${searchResults.length} potential matches from ${service}`);
 
-                  // For each search result, try to match it with our event
-                  for (const result of searchResults) {
-                    try {
-                      const eventUrl = result.url || result.link;
-                      if (!eventUrl) {
-                        console.log('Search result missing URL (checked both url and link properties), skipping');
-                        continue;
-                      }
-
-                      // Ensure VividSeats URLs have the full base URL
-                      const fullEventUrl = service === 'vividseats' && !eventUrl.startsWith('http') 
-                        ? `https://www.vividseats.com${eventUrl}`
-                        : eventUrl;
-
-                      // Check venue match first
-                      const venueMatch = this.compareVenues(result.venue, bestEvent.venue);
-                      if (!venueMatch) {
-                        console.log(`Venue mismatch: "${result.venue}" vs "${bestEvent.venue}"`);
-                        continue;
-                      }
-
-                      // Check date proximity
-                      const resultDate = normalizeDateTime(result.date);
-                      const eventDate = normalizeDateTime(bestEvent.date);
-
-                      if (!resultDate || !eventDate) {
-                        console.log(`Invalid date format: "${result.date}" or "${bestEvent.date}"`);
-                        continue;
-                      }
-
-                      // First check if they're on the same day
-                      if (!areDatesMatching(resultDate, eventDate)) {
-                        console.log(`Date mismatch: "${resultDate}" vs "${eventDate}"`);
-                        continue;
-                      }
-
-                      // Check if there are multiple events by this artist at this venue on this day
-                      const multipleEvents = filteredResults.filter(event => {
-                        const otherDate = normalizeDateTime(event.date);
-                        return event.name === bestEvent.name &&
-                               event.venue === bestEvent.venue &&
-                               areDatesMatching(otherDate, eventDate);
-                      }).length > 1;
-
-                      // If multiple events, also check the time
-                      if (multipleEvents && !doDateTimesMatch(resultDate, eventDate)) {
-                        console.log(`Time mismatch for multiple events: "${resultDate}" vs "${eventDate}"`);
-                        continue;
-                      }
-
-                      console.log(`Found matching ${service} event:`, {
-                          resultName: result.name,
-                          venue: result.venue,
-                          date: result.date,
-                          multipleEvents,
-                          url: fullEventUrl
-                      });
-
-                      // Save the event link first
-                      const { error: linkError } = await this.supabase
-                        .from('event_links')
-                        .insert({
-                          event_id: savedEvent.id,
-                          source: service,
-                          url: fullEventUrl
-                        });
-
-                      if (linkError) {
-                        console.error('Error saving event link:', linkError);
-                      }
-
-                      // Process tickets for this match and stop searching
-                      await this.processEventPage(savedEvent.id, service, fullEventUrl);
-                      foundMatches = true;
-                      break;
-                    } catch (error) {
-                      console.error(`Error processing search result:`, error);
+                // For each search result, try to match it with our event
+                for (const result of searchResults) {
+                  try {
+                    const eventUrl = result.url || result.link;
+                    if (!eventUrl) {
+                      console.log('Search result missing URL (checked both url and link properties), skipping');
                       continue;
                     }
-                  }
 
-                  // If we found and processed a match, stop searching with other terms
-                  if (foundMatches) {
-                    console.log('Match found and processed, skipping remaining search terms');
+                    // Ensure VividSeats URLs have the full base URL
+                    const fullEventUrl = service === 'vividseats' && !eventUrl.startsWith('http') 
+                      ? `https://www.vividseats.com${eventUrl}`
+                      : eventUrl;
+
+                    // Check venue match first
+                    const venueMatch = this.compareVenues(result.venue, bestEvent.venue);
+                    if (!venueMatch) {
+                      console.log(`Venue mismatch: "${result.venue}" vs "${bestEvent.venue}"`);
+                      continue;
+                    }
+
+                    // Check date proximity
+                    const resultDate = normalizeDateTime(result.date);
+                    const eventDate = normalizeDateTime(bestEvent.date);
+
+                    if (!resultDate || !eventDate) {
+                      console.log(`Invalid date format: "${result.date}" or "${bestEvent.date}"`);
+                      continue;
+                    }
+
+                    // First check if they're on the same day
+                    if (!areDatesMatching(resultDate, eventDate)) {
+                      console.log(`Date mismatch: "${resultDate}" vs "${eventDate}"`);
+                      continue;
+                    }
+
+                    // Check if there are multiple events by this artist at this venue on this day
+                    const multipleEvents = filteredResults.filter(event => {
+                      const otherDate = normalizeDateTime(event.date);
+                      return event.name === bestEvent.name &&
+                             event.venue === bestEvent.venue &&
+                             areDatesMatching(otherDate, eventDate);
+                    }).length > 1;
+
+                    // If multiple events, also check the time
+                    if (multipleEvents && !doDateTimesMatch(resultDate, eventDate)) {
+                      console.log(`Time mismatch for multiple events: "${resultDate}" vs "${eventDate}"`);
+                      continue;
+                    }
+
+                    console.log(`Found matching ${service} event:`, {
+                        resultName: result.name,
+                        venue: result.venue,
+                        date: result.date,
+                        multipleEvents,
+                        url: fullEventUrl
+                    });
+
+                    // Save the event link first
+                    const { error: linkError } = await this.supabase
+                      .from('event_links')
+                      .insert({
+                        event_id: savedEvent.id,
+                        source: service,
+                        url: fullEventUrl
+                      });
+
+                    if (linkError) {
+                      console.error('Error saving event link:', linkError);
+                    }
+
+                    // Process tickets for this match
+                    await this.processEventPage(savedEvent.id, service, fullEventUrl);
+                    foundMatches = true;
                     break;
+                  } catch (error) {
+                    console.error(`Error processing search result:`, error);
+                    continue;
                   }
                 }
               }
+            }
 
-              if (!foundMatches) {
-                console.log(`No matching events found on ${service}`);
-              }
+            if (!foundMatches) {
+              console.log(`No matching events found on ${service}`);
             }
           } catch (error) {
             console.error(`Error processing ${service}:`, error);
@@ -1888,5 +1883,17 @@ function calculateJaroWinklerSimilarity(s1: string, s2: string): number {
   const winklerModification = 0.1; // Standard scaling factor
   return jaroSimilarity + (commonPrefix * winklerModification * (1 - jaroSimilarity));
 }
+
+function doEventsMatch(event1: EventSearchResult, event2: EventSearchResult): boolean {
+  return (
+    event1.name === event2.name &&
+    event1.date === event2.date &&
+    event1.venue === event2.venue &&
+    event1.location?.city === event2.location?.city &&
+    event1.location?.state === event2.location?.state &&
+    event1.location?.country === event2.location?.country
+  );
+}
+
 export const searchService = new SearchService();
 
