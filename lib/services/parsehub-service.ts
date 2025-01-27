@@ -50,6 +50,16 @@ class WebReaderService {
     }
   }
 
+  private getSourceFromUrl(url: string): string {
+    const lowerUrl = url.toLowerCase();
+    if (lowerUrl.includes('duckduckgo.com')) return 'DuckDuckGo';
+    if (lowerUrl.includes('stubhub.com')) return 'StubHub';
+    if (lowerUrl.includes('vividseats.com')) return 'VividSeats';
+    if (lowerUrl.includes('ticketmaster.com')) return 'Ticketmaster';
+    if (lowerUrl.includes('livenation.com')) return 'LiveNation';
+    return 'the ticket provider';
+  }
+
   async fetchPage(url: string, options: { headers?: Record<string, string> } = {}): Promise<string> {
     try {
       console.log('Fetching page:', url);
@@ -60,58 +70,66 @@ class WebReaderService {
 
       // Check if this is a VividSeats event page (not search)
       const isVividSeatsEvent = url.includes('vividseats.com') && 
-                               url.includes('/tickets/') && 
-                               !url.includes('/search?');
+                             url.includes('/tickets/') && 
+                             !url.includes('/search?');
 
       // Use cors.sh for VividSeats event pages, Jina for everything else
       const proxyUrl = isVividSeatsEvent ? 
         `https://proxy.cors.sh/${url}` :
         `https://r.jina.ai/${url}`;
 
-      // Only add proxy for Jina requests
+      // Handle Jina reader requests
       if (!isVividSeatsEvent) {
-        options.headers ? options.headers['X-Proxy-Url'] = '47.251.122.81:8888' : options.headers = {'X-Proxy-Url': '47.251.122.81:8888'};
-      } else {
-        // Add cors.sh headers for VividSeats event pages
-        options.headers = {
-          'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-          'accept-language': 'en-US,en;q=0.9',
-          'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-          'sec-ch-ua-mobile': '?0',
-          'sec-ch-ua-platform': '"Windows"'
-        };
-      }
-
-      const response = await fetch(proxyUrl, {
-        method: 'GET',
-        headers: isVividSeatsEvent ? options.headers : {
+        const headers = {
           'Accept': 'application/json',
           'X-Return-Format': 'html',
           'X-Target-Selector': selectors.targetSelector,
           'X-Wait-For-Selector': selectors.waitForSelector,
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept-Language': 'en-US,en;q=0.9',
           ...options.headers
-        }
-      });
+        };
+        
+        const response = await fetch(proxyUrl, {
+          method: 'GET',
+          headers
+        });
 
-      if (!response.ok) {
-        const userMessage = this.getErrorMessage(response.status, url);
-        throw new Error(userMessage);
-      }
-
-      const text = await response.text();
-      
-      try {
-        const jsonResponse = JSON.parse(text);
-        if (jsonResponse.data?.html) {
-          console.log(`Received HTML from ${url.includes('vividseats') ? 'vividseats' : 'stubhub'} (${jsonResponse.data.html.length} bytes)`);
-          return jsonResponse.data.html;
+        if (!response.ok) {
+          const source = this.getSourceFromUrl(url);
+          throw new Error(`Unable to fetch tickets from ${source}. Please try again later.`);
         }
-      } catch (e) {
-        console.warn('Response was not JSON:', e instanceof Error ? e.message : String(e));
+
+        const text = await response.text();
+        try {
+          const jsonResponse = JSON.parse(text);
+          if (jsonResponse.data?.html) {
+            console.log(`Received HTML from ${url.includes('vividseats') ? 'vividseats' : 'stubhub'} (${jsonResponse.data.html.length} bytes)`);
+            return jsonResponse.data.html;
+          }
+        } catch (e) {
+          console.warn('Response was not JSON:', e instanceof Error ? e.message : String(e));
+        }
+        return text;
+      } else {
+        // VividSeats event pages use cors.sh
+        const response = await fetch(proxyUrl, {
+          headers: {
+            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+            'accept-language': 'en-US,en;q=0.9',
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"Windows"'
+          }
+        });
+
+        if (!response.ok) {
+          throw new Error(`cors.sh error: ${response.status} ${response.statusText}`);
+        }
+
+        return response.text();
       }
-      
-      return text;
     } catch (error) {
       console.error('Error fetching page:', error);
       throw error;

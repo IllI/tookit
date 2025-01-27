@@ -11,6 +11,7 @@ import { getParser } from './llm-service';
 import * as fs from 'fs';
 import * as path from 'path';
 import { fetchWithCorsProxy } from '../utils/proxy-utils';
+import { ratio } from 'fuzzball';
 
 interface DbEvent {
   id: string;
@@ -400,7 +401,7 @@ export class SearchService extends EventEmitter {
 
   async searchAll(params: SearchParams): Promise<SearchResult> {
     try {
-      // First, check for existing events
+      // First, check for existing events that match the search criteria
       this.emit('status', 'Checking for existing events...');
       const { data: existingEvents } = await this.supabase
         .from('events')
@@ -409,6 +410,9 @@ export class SearchService extends EventEmitter {
           name,
           date,
           venue,
+          city,
+          state,
+          country,
           event_links!inner(
             source,
             url
@@ -419,86 +423,30 @@ export class SearchService extends EventEmitter {
 
       // If we found existing events, update their tickets
       if (existingEvents?.length) {
+        console.log(`Found ${existingEvents.length} existing events matching search criteria`);
         this.emit('status', `Found ${existingEvents.length} existing events. Updating tickets...`);
         
         // Process all events concurrently but wait for completion
-        await Promise.all(existingEvents.map(async (event: DbEvent) => {
-          const linkPromises = event.event_links.map(async (link: { source: string; url: string }) => {
+        await Promise.all(existingEvents.map(async (event) => {
+          const linkPromises = event.event_links.map(async (link) => {
             this.emit('status', `Updating tickets for ${event.name} from ${link.source}...`);
             try {
               await this.processEventPage(event.id, link.source, link.url);
             } catch (error) {
               console.error(`Error updating tickets from ${link.source}:`, error);
-              this.emit('status', error instanceof Error ? error.message : 'Error updating tickets');
             }
           });
           await Promise.all(linkPromises);
         }));
 
-        // Get all tickets for these events after processing is complete
-        const { data: tickets } = await this.supabase
-          .from('tickets')
-          .select(`
-            id,
-            event_id,
-            section,
-            row,
-            price,
-            quantity,
-            source,
-            listing_id,
-            ticket_url,
-            event:events (
-              id,
-              name,
-              date,
-              venue,
-              city,
-              state,
-              country,
-              event_links (
-                source,
-                url
-              )
-            )
-          `)
-          .in('event_id', existingEvents.map(e => e.id))
-          .order('price');
-
-        // Format tickets with event data for frontend
-        const allTicketsWithEvent = tickets?.map((ticket: any) => {
-          const eventLink = ticket.event.event_links?.find((link: any) => link.source === ticket.source);
-          const ticketUrl = ticket.ticket_url || (eventLink ? eventLink.url : null);
-
-          return {
-            id: ticket.id,
-            name: ticket.event.name,
-            date: ticket.event.date,
-            venue: ticket.event.venue,
-            location: {
-              city: ticket.event.city,
-              state: ticket.event.state,
-              country: ticket.event.country
-            },
-            tickets: [],
-            price: parseFloat(ticket.price.toString()),
-            section: ticket.section,
-            row: ticket.row || '',
-            quantity: parseInt(ticket.quantity.toString()),
-            source: ticket.source,
-            listing_id: ticket.listing_id,
-            ticket_url: ticketUrl
-          };
-        }) || [];
-
-        const metadata: SearchMetadata = {
-          sources: Array.from(new Set(allTicketsWithEvent.map(t => t.source)))
-        };
-
+        // Return the updated tickets for these events
+        const allTickets = await this.getAllTicketsForEvents(existingEvents.map(e => e.id));
         return {
           success: true,
-          data: allTicketsWithEvent,
-          metadata
+          data: allTickets,
+          metadata: {
+            sources: Array.from(new Set(allTickets.map(t => t.source)))
+          }
         };
       }
 
@@ -588,6 +536,41 @@ export class SearchService extends EventEmitter {
         const bestEvent = await this.findBestEvent(filteredResults);
         console.log('Selected best matching event:', bestEvent);
 
+        // Before saving new event, check for matching events again (prevent race conditions)
+        const matchingEvent = await this.findMatchingEvent({
+          name: bestEvent.name,
+          date: bestEvent.date,
+          venue: bestEvent.venue,
+          location: bestEvent.location
+        });
+
+        let eventId: string;
+        if (matchingEvent) {
+          console.log('Found matching existing event, using it instead of creating new one:', matchingEvent);
+          eventId = matchingEvent.id;
+        } else {
+          // Create new event only if no match found
+          eventId = crypto.randomUUID();
+          const { error: saveError } = await this.supabase
+            .from('events')
+            .insert({
+              id: eventId,
+              name: bestEvent.name,
+              date: bestEvent.date,
+              venue: bestEvent.venue,
+              city: bestEvent.location?.city || '',
+              state: bestEvent.location?.state || '',
+              country: bestEvent.location?.country || 'US',
+              created_at: new Date().toISOString()
+            });
+
+          if (saveError) {
+            console.error('Error saving event:', saveError);
+            throw saveError;
+          }
+          console.log('Created new event:', eventId);
+        }
+
         // Initialize ticket links collection
         const allTicketLinks = new Map<string, { source: string; url: string }>();
         
@@ -644,32 +627,10 @@ export class SearchService extends EventEmitter {
 
         console.log('All collected ticket links:', Array.from(allTicketLinks.values()));
 
-        // Save initial event to database
-        const eventId = crypto.randomUUID();
-        const { data: savedEvent, error: saveError } = await this.supabase
-          .from('events')
-          .upsert({
-            id: eventId,
-            name: bestEvent.name,
-            date: bestEvent.date,
-            venue: bestEvent.venue,
-            city: bestEvent.location?.city || '',
-            state: bestEvent.location?.state || '',
-            country: bestEvent.location?.country || 'US',
-            created_at: new Date().toISOString()
-          })
-          .select()
-          .single();
-
-        if (saveError) {
-          console.error('Error saving event:', saveError);
-          throw saveError;
-        }
-
         // Save Ticketmaster link if present
         if (bestEvent.ticket_links?.some(link => link.source === 'ticketmaster')) {
           console.log('Processing Ticketmaster event from link:', bestEvent.ticket_links[0].url);
-          await this.processTicketmasterEvent(savedEvent.id, bestEvent.ticket_links[0].url, bestEvent);
+          await this.processTicketmasterEvent(eventId, bestEvent.ticket_links[0].url, bestEvent);
         }
 
         // Continue with other ticket sources
@@ -683,7 +644,7 @@ export class SearchService extends EventEmitter {
             if (serviceLink?.url && isValidEventUrl(serviceLink.url, service)) {
               console.log(`Found direct ${service} event link:`, serviceLink.url);
               console.log(`Processing ${service} event page from direct link:`, serviceLink.url);
-              await this.processEventPage(savedEvent.id, service, serviceLink.url);
+              await this.processEventPage(eventId, service, serviceLink.url);
               continue;  // Skip to next service after processing direct link
             }
 
@@ -790,7 +751,7 @@ export class SearchService extends EventEmitter {
                     const { error: linkError } = await this.supabase
                       .from('event_links')
                       .insert({
-                        event_id: savedEvent.id,
+                        event_id: eventId,
                         source: service,
                         url: fullEventUrl
                       });
@@ -800,7 +761,7 @@ export class SearchService extends EventEmitter {
                     }
 
                     // Process tickets for this match
-                    await this.processEventPage(savedEvent.id, service, fullEventUrl);
+                    await this.processEventPage(eventId, service, fullEventUrl);
                     foundMatches = true;
                     break;
                   } catch (error) {
@@ -846,19 +807,19 @@ export class SearchService extends EventEmitter {
               )
             )
           `)
-          .eq('event_id', savedEvent.id)
+          .eq('event_id', eventId)
           .order('price');
 
         // Create a single event object with tickets
         const eventWithTickets = {
-          id: savedEvent.id,
-          name: savedEvent.name,
-          date: savedEvent.date,
-          venue: savedEvent.venue,
+          id: eventId,
+          name: bestEvent.name,
+          date: bestEvent.date,
+          venue: bestEvent.venue,
           location: {
-            city: savedEvent.city,
-            state: savedEvent.state,
-            country: savedEvent.country
+            city: bestEvent.location?.city || '',
+            state: bestEvent.location?.state || '',
+            country: bestEvent.location?.country || 'US'
           },
           tickets: savedTickets?.map((ticket: any) => ({
             id: ticket.id,
@@ -877,7 +838,7 @@ export class SearchService extends EventEmitter {
           data: [eventWithTickets],
           metadata: {
             sources: Array.from(new Set(savedTickets?.map(t => t.source) || [])),
-            eventId: savedEvent.id
+            eventId: eventId
           }
         };
       }
@@ -1149,27 +1110,26 @@ export class SearchService extends EventEmitter {
     });
   }
 
-  private compareVenues(venue1: string, venue2: string): boolean {
-    // Normalize venue names
-    const normalize = (venue: string) => {
-      return venue.toLowerCase()
-        .replace(/[^a-z0-9\s]/g, '')  // Remove special characters
-        .replace(/\s+/g, ' ')         // Normalize spaces
-        .replace(/(theatre|theater|arena|stadium|hall|amphitheatre|amphitheater|pavilion|center|centre)/g, '') // Remove common venue type words
-        .trim();
-    };
-
-    const venue1Norm = normalize(venue1);
-    const venue2Norm = normalize(venue2);
-
-    // Check for exact match after normalization
-    if (venue1Norm === venue2Norm) return true;
-
-    // Check for substring match
-    if (venue1Norm.includes(venue2Norm) || venue2Norm.includes(venue1Norm)) return true;
-
-    // Use Jaro-Winkler for fuzzy matching with a high threshold
-    return calculateJaroWinklerSimilarity(venue1Norm, venue2Norm) > 0.9;
+  private compareVenues(venue1: string | undefined, venue2: string | undefined): boolean {
+    if (!venue1 || !venue2) return false;
+    
+    // Basic normalization (just lowercase and trim)
+    const norm1 = venue1.toLowerCase().trim();
+    const norm2 = venue2.toLowerCase().trim();
+    
+    // First try exact match after basic normalization
+    if (norm1 === norm2) return true;
+    
+    // Use fuzzball's ratio algorithm for fuzzy matching
+    const similarity = ratio(norm1, norm2);
+    const VENUE_MATCH_THRESHOLD = 85; // fuzzball uses 0-100 scale
+    
+    const isMatch = similarity >= VENUE_MATCH_THRESHOLD;
+    if (isMatch) {
+      console.log(`Fuzzy venue match (${similarity}%): "${venue1}" ≈ "${venue2}"`);
+    }
+    
+    return isMatch;
   }
 
   private async processTicketmasterEvent(eventId: string, url: string, event: Event) {
@@ -1620,18 +1580,25 @@ export class SearchService extends EventEmitter {
   }
 
   private async searchVividSeats(keyword: string, location?: string): Promise<InternalSearchResult> {
-    // Combine keyword and location with a space between them
-    const searchTerm = location ? `${keyword} ${location}` : keyword;
+    // Simplify the search term by removing anything after a hyphen or dash
+    const simplifiedKeyword = keyword.split(/[-–—]/)[0].trim();
+    
+    // Construct the search URL with the simplified keyword and location
+    const searchTerm = location ? `${simplifiedKeyword} ${location}` : simplifiedKeyword;
     const url = `https://www.vividseats.com/search?searchTerm=${encodeURIComponent(searchTerm)}`;
+    
+    console.log(`Searching VividSeats with simplified term: "${searchTerm}"`);
     
     try {
       const html = await webReaderService.fetchPage(url);
+      // Only process search results, not tickets, since this is a search page
       const result = await this.searchSite(url, 'vividseats', { 
-        keyword,
+        keyword: simplifiedKeyword,
         location,
         html
       });
 
+      // Don't try to process the search page URL for tickets
       return { events: result };
     } catch (error) {
       console.error('VividSeats search error:', error);
@@ -1794,6 +1761,46 @@ export class SearchService extends EventEmitter {
   getLastEmittedSources(): string[] {
     return Array.from(new Set(this.lastEmittedTickets.map(t => t.source)));
   }
+
+  private async getAllTicketsForEvents(eventIds: string[]): Promise<DbTicket[]> {
+    if (!eventIds.length) return [];
+    
+    const { data: tickets, error } = await this.supabase
+      .from('tickets')
+      .select(`
+        id,
+        event_id,
+        section,
+        row,
+        price,
+        quantity,
+        source,
+        listing_id,
+        ticket_url,
+        event:events (
+          id,
+          name,
+          date,
+          venue,
+          city,
+          state,
+          country
+        )
+      `)
+      .in('event_id', eventIds)
+      .order('price');
+
+    if (error) {
+      console.error('Error fetching tickets for events:', error);
+      return [];
+    }
+
+    return tickets?.map(ticket => ({
+      ...ticket,
+      price: parseFloat(ticket.price.toString()),
+      quantity: parseInt(ticket.quantity.toString())
+    })) || [];
+  }
 }
 
 // Helper functions
@@ -1878,6 +1885,40 @@ function doEventsMatch(event1: EventSearchResult, event2: EventSearchResult): bo
     event1.location?.state === event2.location?.state &&
     event1.location?.country === event2.location?.country
   );
+}
+
+function normalizeVenueName(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, '') // Remove special characters
+    .replace(/\s+/g, ' ')        // Normalize spaces
+    .replace(/\b(at|the|in|at the)\b/g, '') // Remove common words
+    .replace(/\b(complex|center|arena|stadium|theatre|theater|amphitheater|amphitheatre|parking)\b/g, '')
+    .replace(/\(.*?\)/g, '')     // Remove parenthetical text
+    .replace(/-.*$/, '')         // Remove everything after a dash
+    .trim();
+}
+
+function compareVenues(venue1: string | undefined, venue2: string | undefined): boolean {
+  if (!venue1 || !venue2) return false;
+  
+  // Basic normalization (just lowercase and trim)
+  const norm1 = venue1.toLowerCase().trim();
+  const norm2 = venue2.toLowerCase().trim();
+  
+  // First try exact match after basic normalization
+  if (norm1 === norm2) return true;
+  
+  // Use fuzzball's ratio algorithm for fuzzy matching
+  const similarity = ratio(norm1, norm2);
+  const VENUE_MATCH_THRESHOLD = 85; // fuzzball uses 0-100 scale
+  
+  const isMatch = similarity >= VENUE_MATCH_THRESHOLD;
+  if (isMatch) {
+    console.log(`Fuzzy venue match (${similarity}%): "${venue1}" ≈ "${venue2}"`);
+  }
+  
+  return isMatch;
 }
 
 export const searchService = new SearchService();
