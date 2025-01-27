@@ -627,10 +627,15 @@ export class SearchService extends EventEmitter {
 
         console.log('All collected ticket links:', Array.from(allTicketLinks.values()));
 
-        // Save Ticketmaster link if present
-        if (bestEvent.ticket_links?.some(link => link.source === 'ticketmaster')) {
-          console.log('Processing Ticketmaster event from link:', bestEvent.ticket_links[0].url);
-          await this.processTicketmasterEvent(eventId, bestEvent.ticket_links[0].url, bestEvent);
+        // Save Ticketmaster/LiveNation link if present
+        const tmLink = bestEvent.ticket_links?.find(link => 
+          link.source === 'ticketmaster' || link.source === 'livenation'
+        );
+        if (tmLink) {
+          console.log('Found Ticketmaster/LiveNation link:', tmLink.url);
+          await this.addEventLink(eventId, tmLink.source, tmLink.url);
+          console.log('Processing Ticketmaster event from link:', tmLink.url);
+          await this.processTicketmasterEvent(eventId, tmLink.url, bestEvent);
         }
 
         // Continue with other ticket sources
@@ -640,9 +645,11 @@ export class SearchService extends EventEmitter {
             const serviceLink = Array.from(allTicketLinks.values())
               .find(link => link.source === service);
 
-            // If we have a valid direct link, process it and continue to next service
+            // If we have a valid direct link, save it and process it
             if (serviceLink?.url && isValidEventUrl(serviceLink.url, service)) {
               console.log(`Found direct ${service} event link:`, serviceLink.url);
+              // Save the event link first
+              await this.addEventLink(eventId, service, serviceLink.url);
               console.log(`Processing ${service} event page from direct link:`, serviceLink.url);
               await this.processEventPage(eventId, service, serviceLink.url);
               continue;  // Skip to next service after processing direct link
