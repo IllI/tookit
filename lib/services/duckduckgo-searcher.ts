@@ -35,36 +35,89 @@ export class DuckDuckGoSearcher {
       const results = $('.result');
       console.log(`Found ${results.length} search results`);
 
-      const eventPromises = results.map(async (_, result) => {
+      // First, collect all valid ticket URLs across all results
+      const allTicketUrls = new Set<string>();
+      const resultData: Array<{ title: string; snippet: string; ticketUrls: string[] }> = [];
+
+      results.each((_, result) => {
         const $result = $(result);
         const title = $result.find('.result__title').text().trim();
         const snippet = $result.find('.result__snippet').text().trim();
         
-        // Extract the actual URL from DuckDuckGo's redirect URL
-        const ddgUrl = $result.find('.result__url').attr('href');
-        if (!ddgUrl) return null;
-
-        // Parse the actual URL from DuckDuckGo's redirect
-        const urlMatch = ddgUrl.match(/uddg=([^&]+)/);
-        if (!urlMatch) return null;
+        // Extract all URLs from the snippet
+        const urlRegex = /https?:\/\/[^\s<>"']+/g;
+        const foundUrls = new Set<string>();
         
-        const url = decodeURIComponent(urlMatch[1]);
-        console.log('Extracted URL:', url);
+        // Add URLs from DuckDuckGo redirect
+        const ddgUrl = $result.find('.result__url').attr('href');
+        if (ddgUrl) {
+          const urlMatch = ddgUrl.match(/uddg=([^&]+)/);
+          if (urlMatch) {
+            const url = decodeURIComponent(urlMatch[1]);
+            foundUrls.add(url);
+            console.log('Found URL from redirect:', url);
+          }
+        }
 
-        // Skip non-ticket vendor URLs
+        // Add URLs from snippet text
+        const matches = snippet.match(urlRegex) || [];
+        matches.forEach(url => {
+          foundUrls.add(url);
+          console.log('Found URL from snippet:', url);
+        });
+
+        // Filter for valid ticket vendor URLs
+        const ticketUrls = Array.from(foundUrls).filter(url => {
+          const urlLower = url.toLowerCase();
+          const isTicketmaster = urlLower.includes('ticketmaster.com') && urlLower.includes('/event/') && !urlLower.includes('/artist/');
+          const isLivenation = urlLower.includes('livenation.com') && urlLower.includes('/event/');
+          const isStubhub = urlLower.includes('stubhub.com') && !urlLower.includes('/search?');
+          const isVividseats = urlLower.includes('vividseats.com') && (urlLower.includes('-tickets-') || urlLower.includes('/production/'));
+          
+          const isValid = isTicketmaster || isLivenation || isStubhub || isVividseats;
+          if (isValid) {
+            console.log('Found valid ticket URL:', url);
+            allTicketUrls.add(url);
+          }
+          return isValid;
+        });
+
+        if (ticketUrls.length > 0) {
+          resultData.push({ title, snippet, ticketUrls });
+        }
+      });
+
+      if (allTicketUrls.size === 0) {
+        console.log('No valid ticket URLs found');
+        return [];
+      }
+
+      console.log('All valid ticket URLs:', Array.from(allTicketUrls));
+
+      // Create ticket links from all valid URLs
+      const ticket_links = Array.from(allTicketUrls).map(url => ({
+        source: this.getSourceFromUrl(url),
+        url: url,
+        is_primary: url.toLowerCase().includes('ticketmaster.com') || url.toLowerCase().includes('livenation.com')
+      }));
+
+      // Check if any of the URLs are Ticketmaster/LiveNation
+      const has_ticketmaster = Array.from(allTicketUrls).some(url => {
         const urlLower = url.toLowerCase();
-        const isTicketSite = urlLower.includes('ticketmaster.com') || 
-                            urlLower.includes('livenation.com') ||
-                            urlLower.includes('stubhub.com') ||
-                            urlLower.includes('vividseats.com');
+        return (urlLower.includes('ticketmaster.com') && urlLower.includes('/event/')) || 
+               (urlLower.includes('livenation.com') && urlLower.includes('/event/'));
+      });
 
-        if (!isTicketSite) return null;
-
+      // Now process each result with event data
+      const eventPromises = resultData.map(async ({ title, snippet }) => {
         // Extract initial event data from title and snippet
         const eventData = await this.parser.parseEvents(`${title}\n${snippet}`);
-        if (!eventData?.events?.length) return null;
-
-        const event = eventData.events[0];
+        const event = eventData?.events?.[0] || {
+          name: title,
+          date: '',
+          venue: '',
+          location: undefined
+        };
         
         // Extract date and time information
         let eventDate = '';
@@ -97,14 +150,17 @@ export class DuckDuckGoSearcher {
           }
         }
 
-        // If no time found, make one more attempt from the URL
-        if (!eventDate && urlLower.includes('ticketmaster.com')) {
-          const urlDateMatch = url.match(/(\d{2})-(\d{2})-(\d{4})/);
-          if (urlDateMatch) {
-            const [_, month, day, year] = urlDateMatch;
-            // Default to 6:00 PM if no time found
-            eventDate = `${year}-${month}-${day}T18:00:00.000Z`;
-            console.log('Using default time from URL date:', eventDate);
+        // If no time found, try to get it from a Ticketmaster URL
+        if (!eventDate) {
+          const tmUrl = Array.from(allTicketUrls).find(url => url.toLowerCase().includes('ticketmaster.com'));
+          if (tmUrl) {
+            const urlDateMatch = tmUrl.match(/(\d{2})-(\d{2})-(\d{4})/);
+            if (urlDateMatch) {
+              const [_, month, day, year] = urlDateMatch;
+              // Default to 6:00 PM if no time found
+              eventDate = `${year}-${month}-${day}T18:00:00.000Z`;
+              console.log('Using default time from Ticketmaster URL date:', eventDate);
+            }
           }
         }
 
@@ -117,17 +173,13 @@ export class DuckDuckGoSearcher {
             state: event.location.split(',')[1]?.trim() || '',
             country: 'US'
           } : undefined,
-          source: this.getSourceFromUrl(url),
-          link: url,
+          source: this.getSourceFromUrl(Array.from(allTicketUrls)[0]),
+          link: Array.from(allTicketUrls)[0],
           description: snippet,
-          ticket_links: [{
-            source: this.getSourceFromUrl(url),
-            url: url,
-            is_primary: urlLower.includes('ticketmaster.com') || urlLower.includes('livenation.com')
-          }],
-          has_ticketmaster: urlLower.includes('ticketmaster.com') || urlLower.includes('livenation.com')
+          ticket_links,
+          has_ticketmaster
         };
-      }).get();
+      });
 
       const events = (await Promise.all(eventPromises)).filter(Boolean);
       console.log(`Found ${events.length} valid events`);

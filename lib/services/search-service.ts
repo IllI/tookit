@@ -581,17 +581,36 @@ export class SearchService extends EventEmitter {
             return /\/event\/|\/[0-9]+$/.test(url);
           }
           if (source === 'vividseats') {
-            // VividSeats event URLs contain /tickets/ but not /search?
-            return url.includes('/tickets/') && !url.includes('/search?');
+            // VividSeats event URLs contain /tickets/ or /production/
+            return url.includes('-tickets-') || url.includes('/production/');
           }
-          return true; // Other sources like Ticketmaster are handled separately
+          if (source === 'ticketmaster' || source === 'livenation') {
+            // Ticketmaster/LiveNation event URLs contain /event/ and not /artist/
+            return url.includes('/event/') && !url.includes('/artist/');
+          }
+          return true;
         };
         
         // Collect ticket links from best event
         bestEvent.ticket_links?.forEach(link => {
           if (!link.source || !link.url) return;
           
-          // Only add valid event URLs for StubHub and VividSeats
+          // Check if it's a Ticketmaster/LiveNation link first
+          const isTicketmaster = link.source === 'ticketmaster' || link.source === 'livenation';
+          if (isTicketmaster) {
+            bestEvent.has_ticketmaster = true;
+            // Only add valid event URLs (not artist pages)
+            if (link.url.includes('/event/') && !link.url.includes('/artist/')) {
+              const key = `${link.source}-${link.url}`;
+              allTicketLinks.set(key, {
+                source: 'ticketmaster',
+                url: link.url
+              });
+            }
+            return;
+          }
+          
+          // For other sources, validate the URL
           if (!isValidEventUrl(link.url, link.source)) {
             console.log(`Skipping invalid ${link.source} URL: ${link.url}`);
             return;
@@ -604,58 +623,54 @@ export class SearchService extends EventEmitter {
           });
         });
 
-        // Collect ticket links from other matching events
-        filteredResults.forEach(event => {
-          if (event !== bestEvent) {
-            event.ticket_links?.forEach(link => {
-              if (!link.source || !link.url) return;
-              
-              // Only add valid event URLs for StubHub and VividSeats
-              if (!isValidEventUrl(link.url, link.source)) {
-                console.log(`Skipping invalid ${link.source} URL: ${link.url}`);
-                return;
-              }
-              
-              const key = `${link.source}-${link.url}`;
+        // Also check URLs in the event description for Ticketmaster links
+        if (bestEvent.description) {
+          const tmMatches = bestEvent.description.match(/https?:\/\/[^\s)]+ticketmaster\.com[^\s)]+/g) || [];
+          tmMatches.forEach(url => {
+            if (url.includes('/event/') && !url.includes('/artist/')) {
+              bestEvent.has_ticketmaster = true;
+              const key = `ticketmaster-${url}`;
               allTicketLinks.set(key, {
-                source: link.source,
-                url: link.url
+                source: 'ticketmaster',
+                url
               });
-            });
-          }
-        });
+            }
+          });
+        }
 
         console.log('All collected ticket links:', Array.from(allTicketLinks.values()));
+        console.log('Has Ticketmaster:', bestEvent.has_ticketmaster);
 
-        // Save Ticketmaster/LiveNation link if present
-        const tmLink = bestEvent.ticket_links?.find(link => 
-          link.source === 'ticketmaster' || link.source === 'livenation'
-        );
+        // Find Ticketmaster/LiveNation link first
+        const tmLink = Array.from(allTicketLinks.values())
+          .find(link => {
+            const isTicketmaster = link.source === 'ticketmaster' || link.source === 'livenation';
+            return isTicketmaster && isValidEventUrl(link.url, link.source);
+          });
+
         if (tmLink) {
-          console.log('Found Ticketmaster/LiveNation link:', tmLink.url);
+          console.log('Found Ticketmaster/LiveNation event link:', tmLink.url);
           await this.addEventLink(eventId, tmLink.source, tmLink.url);
           console.log('Processing Ticketmaster event from link:', tmLink.url);
           await this.processTicketmasterEvent(eventId, tmLink.url, bestEvent);
         }
 
-        // Continue with other ticket sources
+        // Process other ticket sources
         for (const service of ['stubhub', 'vividseats']) {
           try {
             // Check if we have a direct event link from search results
             const serviceLink = Array.from(allTicketLinks.values())
-              .find(link => link.source === service);
+              .find(link => link.source === service && isValidEventUrl(link.url, service));
 
-            // If we have a valid direct link, save it and process it
-            if (serviceLink?.url && isValidEventUrl(serviceLink.url, service)) {
+            if (serviceLink?.url) {
               console.log(`Found direct ${service} event link:`, serviceLink.url);
-              // Save the event link first
               await this.addEventLink(eventId, service, serviceLink.url);
               console.log(`Processing ${service} event page from direct link:`, serviceLink.url);
               await this.processEventPage(eventId, service, serviceLink.url);
               continue;  // Skip to next service after processing direct link
             }
 
-            // If no valid direct link, we need to search the service
+            // Only if we don't have a valid direct link, try searching
             console.log(`No valid ${service} event link found, searching ${service} for event match`);
             
             // Create search terms that combine both the keyword and best event name
@@ -879,6 +894,31 @@ export class SearchService extends EventEmitter {
       // Use Gemini to extract data
       const parsedEvents = await this.parser.parseEvents(html);
 
+      // Add extracted URLs to parsedEvents if they're not already there
+      if (!parsedEvents.extractedUrls) {
+        parsedEvents.extractedUrls = [];
+      }
+
+      // Extract URLs from the HTML using regex
+      const urlRegex = /https?:\/\/[^\s<>"']+/g;
+      const matches = html.match(urlRegex) || [];
+      
+      // Add any URLs that match our ticket vendors
+      matches.forEach(url => {
+        const lowerUrl = url.toLowerCase();
+        if (
+          (lowerUrl.includes('ticketmaster.com') && lowerUrl.includes('/event/')) ||
+          (lowerUrl.includes('livenation.com') && lowerUrl.includes('/event/')) ||
+          (lowerUrl.includes('stubhub.com') && (lowerUrl.includes('/event/') || /\/[0-9]+$/.test(lowerUrl))) ||
+          (lowerUrl.includes('vividseats.com') && (lowerUrl.includes('-tickets-') || lowerUrl.includes('/production/')))
+        ) {
+          if (!parsedEvents.extractedUrls.includes(url)) {
+            console.log('Found ticket vendor URL:', url);
+            parsedEvents.extractedUrls.push(url);
+          }
+        }
+      });
+
       if (!parsedEvents.events.length) {
         console.log('No events found by Gemini parser');
         // Fall back to Cheerio-based extraction
@@ -995,21 +1035,82 @@ export class SearchService extends EventEmitter {
       const validEvents = parsedEvents.events
         .filter((event: any) => event.eventUrl || url)
         .map((event: any) => {
-          // Ensure we have a complete date with time
-          let eventDate = normalizeDateTime(event.date);
-          if (!eventDate) {
-            // If we only have a year, default to January 1st of that year
-            if (/^\d{4}$/.test(event.date)) {
-              eventDate = `${event.date}-01-01T00:00:00Z`;
-            } else {
-              console.log(`Invalid date format for event: ${event.date}`);
-              eventDate = new Date().toISOString(); // Fallback to current date
-            }
+          // Process all URLs first
+          const allUrls = new Set<string>();
+          
+          // Add the main event URL
+          if (event.eventUrl) allUrls.add(event.eventUrl);
+          if (url) allUrls.add(url);
+          
+          // Add URLs from description if present
+          if (event.description) {
+            const urlMatches = event.description.match(/https?:\/\/[^\s)]+/g) || [];
+            urlMatches.forEach((u: string) => allUrls.add(u));
           }
+
+          // Add extracted URLs from DuckDuckGo results
+          if (parsedEvents.extractedUrls && Array.isArray(parsedEvents.extractedUrls)) {
+            parsedEvents.extractedUrls.forEach(u => {
+              if (typeof u === 'string') allUrls.add(u);
+            });
+          }
+
+          // Process all collected URLs
+          const ticketLinks: Array<{ source: string; url: string; is_primary: boolean }> = [];
+          let hasTicketmaster = false;
+
+          Array.from(allUrls).forEach(u => {
+            const lowerUrl = u.toLowerCase();
+            
+            // Check for Ticketmaster/LiveNation links
+            if (lowerUrl.includes('ticketmaster.com') && lowerUrl.includes('/event/')) {
+              hasTicketmaster = true;
+              ticketLinks.push({
+                source: 'ticketmaster',
+                url: u,
+                is_primary: true
+              });
+              console.log('Added Ticketmaster event link:', u);
+            } else if (lowerUrl.includes('livenation.com') && lowerUrl.includes('/event/')) {
+              hasTicketmaster = true;
+              ticketLinks.push({
+                source: 'livenation',
+                url: u,
+                is_primary: true
+              });
+              console.log('Added LiveNation event link:', u);
+            }
+            
+            // Check for StubHub links
+            else if (lowerUrl.includes('stubhub.com') && (lowerUrl.includes('/event/') || /\/[0-9]+$/.test(lowerUrl))) {
+              ticketLinks.push({
+                source: 'stubhub',
+                url: u,
+                is_primary: false
+              });
+              console.log('Added StubHub event link:', u);
+            }
+            
+            // Check for VividSeats links
+            else if (lowerUrl.includes('vividseats.com') && (lowerUrl.includes('-tickets-') || lowerUrl.includes('/production/'))) {
+              ticketLinks.push({
+                source: 'vividseats',
+                url: u,
+                is_primary: false
+              });
+              console.log('Added VividSeats event link:', u);
+            }
+          });
+
+          console.log('Processed URLs for event:', {
+            name: event.name,
+            ticketLinks,
+            hasTicketmaster
+          });
 
           return {
             name: event.name,
-            date: eventDate,
+            date: normalizeDateTime(event.date) || new Date().toISOString(),
             venue: event.venue,
             location: event.location ? {
               city: event.location.split(',')[0]?.trim() || '',
@@ -1018,13 +1119,9 @@ export class SearchService extends EventEmitter {
             } : undefined,
             source,
             link: event.eventUrl || url,
-            description: event.price ? `Tickets from ${event.price}` : undefined,
-            ticket_links: [{
-              source,
-              url: event.eventUrl || url,
-              is_primary: source === 'ticketmaster' || source === 'livenation'
-            }],
-            has_ticketmaster: source === 'ticketmaster' || source === 'livenation'
+            description: event.description,
+            ticket_links: ticketLinks,
+            has_ticketmaster: hasTicketmaster
           };
         });
 
@@ -1151,16 +1248,40 @@ export class SearchService extends EventEmitter {
         return;
       }
 
+      // Helper function to handle rate-limited API calls
+      const makeApiCall = async (url: string, retries = 3, delay = 1000): Promise<any> => {
+        for (let i = 0; i < retries; i++) {
+          try {
+            const response = await fetch(url);
+            
+            if (response.status === 429) {
+              console.log(`Rate limited by Ticketmaster API, attempt ${i + 1}/${retries}. Waiting ${delay}ms...`);
+              await new Promise(resolve => setTimeout(resolve, delay));
+              // Exponential backoff
+              delay *= 2;
+              continue;
+            }
+            
+            if (!response.ok) {
+              throw new Error(`Ticketmaster API error: ${response.status} ${response.statusText}`);
+            }
+            
+            return await response.json();
+          } catch (error) {
+            if (i === retries - 1) throw error;
+            console.log(`API call failed, attempt ${i + 1}/${retries}. Waiting ${delay}ms...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+            // Exponential backoff
+            delay *= 2;
+          }
+        }
+      };
+
       // Search for the event using the Discovery API
       const searchUrl = `https://app.ticketmaster.com/discovery/v2/events.json?apikey=${consumerKey}&keyword=${encodeURIComponent(event.name)}&city=${encodeURIComponent(event.location.city)}&stateCode=${event.location.state}&sort=date,asc`;
       console.log('Searching Ticketmaster events:', searchUrl.replace(consumerKey, '***'));
 
-      const searchResponse = await fetch(searchUrl);
-      if (!searchResponse.ok) {
-        throw new Error(`Ticketmaster API error: ${searchResponse.status} ${searchResponse.statusText}`);
-      }
-
-      const searchResults = await searchResponse.json();
+      const searchResults = await makeApiCall(searchUrl);
       if (!searchResults._embedded?.events?.length) {
         console.log('No events found for search');
         return;
@@ -1180,16 +1301,14 @@ export class SearchService extends EventEmitter {
         return;
       }
 
+      // Add a delay before the second API call
+      await new Promise(resolve => setTimeout(resolve, 1000));
+
       // Get the full event details including price ranges
       const eventUrl = `https://app.ticketmaster.com/discovery/v2/events/${matchingEvent.id}?apikey=${consumerKey}`;
       console.log('Fetching Ticketmaster event:', eventUrl.replace(consumerKey, '***'));
 
-      const response = await fetch(eventUrl);
-      if (!response.ok) {
-        throw new Error(`Ticketmaster API error: ${response.status} ${response.statusText}`);
-      }
-
-      const tmEvent = await response.json();
+      const tmEvent = await makeApiCall(eventUrl);
       console.log('Got Ticketmaster event:', tmEvent);
 
       if (tmEvent.priceRanges?.length) {
