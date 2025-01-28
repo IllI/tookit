@@ -681,7 +681,7 @@ export class SearchService extends EventEmitter {
 
               const searchUrl = service === 'stubhub' ?
                 `https://www.stubhub.com/secure/search?q=${encodeURIComponent(searchTerm)}+${encodeURIComponent(locationTerm)}` :
-                `https://www.vividseats.com/search?searchTerm=${encodeURIComponent(searchTerm)}${locationTerm ? '+' + encodeURIComponent(locationTerm) : ''}`;
+                `https://www.vividseats.com/search?searchTerm=${encodeURIComponent(searchTerm)}+${encodeURIComponent(locationTerm)}`;
                 
               console.log(`Searching ${service} with term: "${searchTerm}"`);
               const searchHtml = await webReaderService.fetchPage(searchUrl);
